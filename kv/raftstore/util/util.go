@@ -16,11 +16,12 @@ import (
 const RaftInvalidIndex uint64 = 0
 const InvalidID uint64 = 0
 
-/// `is_initial_msg` checks whether the `msg` can be used to initialize a new peer or not.
+// / `is_initial_msg` checks whether the `msg` can be used to initialize a new peer or not.
 // There could be two cases:
-// 1. Target peer already exists but has not established communication with leader yet
-// 2. Target peer is added newly due to member change or region split, but it's not
-//    created yet
+//  1. Target peer already exists but has not established communication with leader yet
+//  2. Target peer is added newly due to member change or region split, but it's not
+//     created yet
+//
 // For both cases the region start key and end key are attached in RequestVote and
 // Heartbeat message for the store of that peer to check whether to create a new peer
 // when receiving these messages, or just to wait for a pending region split to perform
@@ -31,7 +32,7 @@ func IsInitialMsg(msg *eraftpb.Message) bool {
 		(msg.MsgType == eraftpb.MessageType_MsgHeartbeat && msg.Commit == RaftInvalidIndex)
 }
 
-/// Check if key in region range [`start_key`, `end_key`).
+// / Check if key in region range [`start_key`, `end_key`).
 func CheckKeyInRegion(key []byte, region *metapb.Region) error {
 	if bytes.Compare(key, region.StartKey) >= 0 && (len(region.EndKey) == 0 || bytes.Compare(key, region.EndKey) < 0) {
 		return nil
@@ -40,7 +41,7 @@ func CheckKeyInRegion(key []byte, region *metapb.Region) error {
 	}
 }
 
-/// Check if key in region range (`start_key`, `end_key`).
+// / Check if key in region range (`start_key`, `end_key`).
 func CheckKeyInRegionExclusive(key []byte, region *metapb.Region) error {
 	if bytes.Compare(region.StartKey, key) < 0 && (len(region.EndKey) == 0 || bytes.Compare(key, region.EndKey) < 0) {
 		return nil
@@ -49,7 +50,7 @@ func CheckKeyInRegionExclusive(key []byte, region *metapb.Region) error {
 	}
 }
 
-/// Check if key in region range [`start_key`, `end_key`].
+// / Check if key in region range [`start_key`, `end_key`].
 func CheckKeyInRegionInclusive(key []byte, region *metapb.Region) error {
 	if bytes.Compare(key, region.StartKey) >= 0 && (len(region.EndKey) == 0 || bytes.Compare(key, region.EndKey) <= 0) {
 		return nil
@@ -58,7 +59,7 @@ func CheckKeyInRegionInclusive(key []byte, region *metapb.Region) error {
 	}
 }
 
-/// check whether epoch is staler than check_epoch.
+// / check whether epoch is staler than check_epoch.
 func IsEpochStale(epoch *metapb.RegionEpoch, checkEpoch *metapb.RegionEpoch) bool {
 	return epoch.Version < checkEpoch.Version || epoch.ConfVer < checkEpoch.ConfVer
 }
@@ -68,10 +69,10 @@ func IsVoteMessage(msg *eraftpb.Message) bool {
 	return tp == eraftpb.MessageType_MsgRequestVote
 }
 
-/// `is_first_vote_msg` checks `msg` is the first vote message or not. It's used for
-/// when the message is received but there is no such region in `Store::region_peers` and the
-/// region overlaps with others. In this case we should put `msg` into `pending_votes` instead of
-/// create the peer.
+// / `is_first_vote_msg` checks `msg` is the first vote message or not. It's used for
+// / when the message is received but there is no such region in `Store::region_peers` and the
+// / region overlaps with others. In this case we should put `msg` into `pending_votes` instead of
+// / create the peer.
 func IsFirstVoteMessage(msg *eraftpb.Message) bool {
 	return IsVoteMessage(msg) && msg.Term == meta.RaftInitLogTerm+1
 }

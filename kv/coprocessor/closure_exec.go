@@ -36,7 +36,8 @@ const (
 
 // buildClosureExecutor build a closureExecutor for the DAGRequest.
 // Currently the composition of executors are:
-// 	tableScan|indexScan [selection] [topN | limit | agg]
+//
+//	tableScan|indexScan [selection] [topN | limit | agg]
 func (svr *CopHandler) buildClosureExecutor(dagCtx *dagContext, dagReq *tipb.DAGRequest) (*closureExecutor, error) {
 	ce, err := svr.newClosureExecutor(dagCtx, dagReq)
 	if err != nil {

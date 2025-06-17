@@ -1,3 +1,4 @@
+//go:build modguard
 // +build modguard
 
 package tools

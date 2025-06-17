@@ -33,7 +33,7 @@ func NewSplitCheckHandler(engine *badger.DB, router message.RaftRouter, conf *co
 	return runner
 }
 
-/// run checks a region with split checkers to produce split keys and generates split admin command.
+// / run checks a region with split checkers to produce split keys and generates split admin command.
 func (r *splitCheckHandler) Handle(t worker.Task) {
 	spCheckTask, ok := t.(*SplitCheckTask)
 	if !ok {
@@ -69,7 +69,7 @@ func (r *splitCheckHandler) Handle(t worker.Task) {
 	}
 }
 
-/// SplitCheck gets the split keys by scanning the range.
+// / SplitCheck gets the split keys by scanning the range.
 func (r *splitCheckHandler) splitCheck(regionID uint64, startKey, endKey []byte) []byte {
 	txn := r.engine.NewTransaction(false)
 	defer txn.Discard()

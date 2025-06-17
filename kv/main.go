@@ -25,7 +25,8 @@ var (
 	schedulerAddr = flag.String("scheduler", "", "scheduler address")
 	storeAddr     = flag.String("addr", "", "store address")
 	dbPath        = flag.String("path", "", "directory path of db")
-	logLevel      = flag.String("loglevel", "", "the level of log")
+
+	logLevel = flag.String("loglevel", "", "the level of log")
 )
 
 func main() {

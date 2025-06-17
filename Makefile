@@ -51,6 +51,8 @@ ci: default
 format:
 	@gofmt -s -w `find . -name '*.go' -type f ! -path '*/_tools/*' -print`
 
+project: project1 project2 project3 project4
+
 project1:
 	$(GOTEST) ./kv/server -run 1
 
