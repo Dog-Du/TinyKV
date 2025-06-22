@@ -6,7 +6,7 @@ require (
 	github.com/coreos/pkg v0.0.0-20180928190104-399ea9e2e55f
 	github.com/docker/go-units v0.4.0
 	github.com/gogo/protobuf v1.3.2
-	github.com/golang/protobuf v1.5.0
+	github.com/golang/protobuf v1.5.4
 	github.com/google/btree v1.0.0
 	github.com/juju/errors v0.0.0-20181118221551-089d3ea4e4d5
 	github.com/opentracing/opentracing-go v1.0.2

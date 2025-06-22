@@ -1544,6 +1544,155 @@ func TestSplitVote2AA(t *testing.T) {
 	}
 }
 
+// this test want to know what will happen when election fails and followers has vote other candidate
+// however, this is hard to test, because network latency is hard to simulate
+// such as:
+// 1 and 2 is candidate, 3 and 4 is follower
+// 3 vote to 1, 4 vote to 2
+// this election will fail
+// then 1 down, and 2 start a new election
+// 2 become leader, 3 and 4 become follower
+// it needs network latency to simulate this
+// so use a stupid way to simulate this
+// election should not depend on network latency
+func TestVoteToOtherCandidate2AA(t *testing.T) {
+	n1 := newTestRaft(1, []uint64{1, 2, 3, 4}, 10, 1, NewMemoryStorage())
+	n2 := newTestRaft(2, []uint64{1, 2, 3, 4}, 10, 1, NewMemoryStorage())
+	n3 := newTestRaft(3, []uint64{1, 2, 3, 4}, 10, 1, NewMemoryStorage())
+	n4 := newTestRaft(4, []uint64{1, 2, 3, 4}, 10, 1, NewMemoryStorage())
+
+	n1.becomeFollower(1, None)
+	n2.becomeFollower(1, None)
+	n3.becomeFollower(1, None)
+	n4.becomeFollower(1, None)
+
+	nt := newNetwork(n1, n2, n3, n4)
+	msgs := []pb.Message{
+		{From: 1, To: 1, MsgType: pb.MessageType_MsgHup},
+		{From: 2, To: 2, MsgType: pb.MessageType_MsgHup},
+
+		{From: 1, To: 2, MsgType: pb.MessageType_MsgRequestVote, Term: 2},
+		{From: 1, To: 3, MsgType: pb.MessageType_MsgRequestVote, Term: 2},
+		{From: 2, To: 1, MsgType: pb.MessageType_MsgRequestVote, Term: 2},
+		{From: 2, To: 4, MsgType: pb.MessageType_MsgRequestVote, Term: 2},
+		{From: 1, To: 4, MsgType: pb.MessageType_MsgRequestVote, Term: 2},
+		{From: 2, To: 3, MsgType: pb.MessageType_MsgRequestVote, Term: 2},
+
+		{From: 3, To: 1, MsgType: pb.MessageType_MsgRequestVoteResponse, Term: 2, Reject: false},
+		{From: 4, To: 2, MsgType: pb.MessageType_MsgRequestVoteResponse, Term: 2, Reject: false},
+		{From: 3, To: 2, MsgType: pb.MessageType_MsgRequestVoteResponse, Term: 2, Reject: true},
+		{From: 4, To: 1, MsgType: pb.MessageType_MsgRequestVoteResponse, Term: 2, Reject: true},
+		{From: 2, To: 1, MsgType: pb.MessageType_MsgRequestVoteResponse, Term: 2, Reject: true},
+		{From: 1, To: 2, MsgType: pb.MessageType_MsgRequestVoteResponse, Term: 2, Reject: true},
+	}
+
+	for _, m := range msgs {
+		p := nt.peers[m.To]
+		p.Step(m)
+	}
+
+	for _, n := range nt.peers {
+		n.readMessages()
+	}
+
+	// check state
+	// n2 == candidate
+	// n3 == candidate
+	sm := nt.peers[1].(*Raft)
+	if sm.State != StateCandidate {
+		t.Errorf("peer 1 state: %s, want %s", sm.State, StateCandidate)
+	}
+	sm = nt.peers[2].(*Raft)
+	if sm.State != StateCandidate {
+		t.Errorf("peer 2 state: %s, want %s", sm.State, StateCandidate)
+	}
+
+	nt.isolate(1)
+	nt.send(pb.Message{From: 2, To: 2, MsgType: pb.MessageType_MsgHup})
+
+	// check state
+	// n2 == leader
+	// n3 == follower n4 == follower
+	sm = nt.peers[2].(*Raft)
+	if sm.State != StateLeader {
+		t.Errorf("peer 2 state: %s, want %s", sm.State, StateLeader)
+	}
+	sm = nt.peers[3].(*Raft)
+	if sm.State != StateFollower {
+		t.Errorf("peer 3 state: %s, want %s", sm.State, StateFollower)
+	}
+	sm = nt.peers[4].(*Raft)
+	if sm.State != StateFollower {
+		t.Errorf("peer 4 state: %s, want %s", sm.State, StateFollower)
+	}
+}
+
+func TestNetworkLatencyWhileElection2AA(t *testing.T) {
+	n1 := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
+	n2 := newTestRaft(2, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
+	n3 := newTestRaft(3, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
+
+	n1.becomeFollower(1, None)
+	n2.becomeFollower(1, None)
+	n3.becomeFollower(1, None)
+
+	nt := newNetwork(n1, n2, n3)
+
+	msgs := []pb.Message{
+		{From: 1, To: 1, MsgType: pb.MessageType_MsgHup},
+		{From: 1, To: 2, MsgType: pb.MessageType_MsgRequestVote, Term: 2},
+		{From: 1, To: 3, MsgType: pb.MessageType_MsgRequestVote, Term: 2},
+
+		{From: 2, To: 1, MsgType: pb.MessageType_MsgRequestVoteResponse, Term: 2, Reject: false},
+		{From: 1, To: 2, MsgType: pb.MessageType_MsgPropose, Term: 2, Entries: []*pb.Entry{{Data: []byte("some data")}}},
+		{From: 1, To: 3, MsgType: pb.MessageType_MsgPropose, Term: 2, Entries: []*pb.Entry{{Data: []byte("some data")}}},
+	}
+
+	for _, m := range msgs {
+		p := nt.peers[m.To]
+		p.Step(m)
+	}
+
+	for _, n := range nt.peers {
+		n.readMessages()
+	}
+
+	sm := nt.peers[1].(*Raft)
+	if sm.State != StateLeader {
+		t.Errorf("peer 1 state: %s, want %s", sm.State, StateLeader)
+	}
+	sm = nt.peers[2].(*Raft)
+	if sm.State != StateFollower {
+		t.Errorf("peer 2 state: %s, want %s", sm.State, StateFollower)
+	}
+	
+	msgs = []pb.Message{
+		{From: 3, To: 1, MsgType: pb.MessageType_MsgRequestVoteResponse, Term: 1, Reject: false},
+	}
+
+	for _, m := range msgs {
+		p := nt.peers[m.To]
+		p.Step(m)
+	}
+
+	for _, n := range nt.peers {
+		n.readMessages()
+	}
+
+	sm = nt.peers[1].(*Raft)
+	if sm.State != StateLeader {
+		t.Errorf("peer 1 state: %s, want %s", sm.State, StateLeader)
+	}
+	sm = nt.peers[2].(*Raft)
+	if sm.State != StateFollower {
+		t.Errorf("peer 2 state: %s, want %s", sm.State, StateFollower)
+	}
+	sm = nt.peers[3].(*Raft)
+	if sm.State != StateFollower {
+		t.Errorf("peer 3 state: %s, want %s", sm.State, StateFollower)
+	}
+}
+
 func entsWithConfig(configFunc func(*Config), id uint64, terms ...uint64) *Raft {
 	storage := NewMemoryStorage()
 	for i, term := range terms {
