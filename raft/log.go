@@ -15,6 +15,7 @@
 package raft
 
 import (
+	"fmt"
 	"log"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
@@ -29,6 +30,13 @@ import (
 // for simplify the RaftLog implement should manage all log entries
 // that not truncated
 
+// 所有没有 compact 的日志都在内存中。
+// firstIndex：该值取自storage.FirstIndex()，可以从MemoryStorage的实现看到，该值是MemoryStorage.ents数组的第一个数据索引，也就是MemoryStorage结构体中快照数据与日志条目数据的分界线。
+// lastIndex：该值取自storage.LastIndex()，可以从MemoryStorage的实现看到，该值是MemoryStorage.ents数组的最后一个数据索引。
+// unstable.offset：该值为lastIndex索引的下一个位置。
+// committed、applied：在初始的情况下，这两个值是firstIndex的上一个索引位置，这是因为在firstIndex之前的数据既然已经是持久化数据了，说明都是已经被提交成功的数据了。
+// applied：在初始的情况下，这两个值是firstIndex的上一个索引位置，这是因为在firstIndex之前的数据既然已经是持久化数据了，说明都是已经被提交成功的数据了。
+// from etcd。
 // 所有没有 compact 的日志都在内存中。
 type RaftLog struct {
 	// storage contains all stable entries since the last snapshot.
@@ -46,7 +54,8 @@ type RaftLog struct {
 	// log entries with index <= stabled are persisted to storage.
 	// It is used to record the logs that are not persisted by storage yet.
 	// Everytime handling `Ready`, the unstabled logs will be included.
-	stabled uint64
+	stabled    uint64
+	firstIndex uint64 // == storage.LastIndex() + 1 at init, and never change after init
 
 	// all entries that have not yet compact.
 	entries []pb.Entry
@@ -56,39 +65,64 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
-	firstIndex uint64 // 未被快照截断的第一个日志, 日志为空时为 1
-
-	lastIndex uint64 // 最后一个索引， 日志为空时为 0
 }
 
-func (l *RaftLog) modifyCommitted(committed uint64) {
-	if committed < l.committed || committed < l.applied {
-		log.Panicf("committed(%d) < committed(%d) or committed(%d) < applied(%d)", committed, l.committed, committed, l.applied)
+// applied <= committed
+func (l *RaftLog) check() {
+	if l.applied > l.committed {
+		log.Panicf("applied > committed, applied: %d, committed: %d", l.applied, l.committed)
+	}
+}
+
+// committed and applied are always increasing, so we can use max to update them
+func (l *RaftLog) commitTo(leaderCommit uint64, lastNewIndex uint64) {
+	l.check()
+	l.committed = min(leaderCommit, lastNewIndex)
+	l.check()
+}
+
+func (l *RaftLog) appliedTo(index uint64) {
+	l.check()
+	l.applied = max(l.applied, index)
+	l.check()
+}
+
+// stabled maybe decrease
+func (l *RaftLog) stableTo(index uint64) {
+	l.check()
+	l.stabled = index
+	l.check()
+}
+
+// appendlog always after committo
+func (l *RaftLog) appendLog(ents []*pb.Entry, preLogTerm uint64, preLogIndex uint64) {
+	checkEnts := l.Entries(preLogIndex+1, preLogIndex+1+uint64(len(ents)))
+	appended := true
+
+	for i, ent := range checkEnts {
+		if ent.Term == ents[i].Term && ent.Index == ents[i].Index &&
+			ent.Index == preLogIndex+1 {
+			preLogIndex++
+		} else {
+			appended = false
+			break
+		}
 	}
 
-	l.committed = committed
-}
-
-func (l *RaftLog) modifyApplied(applied uint64) {
-	if applied < l.applied || applied > l.committed {
-		log.Panicf("applied(%d) < applied(%d) or applied(%d) > committed(%d)", applied, l.applied, applied, l.committed)
+	if len(ents) == 0 || (appended && len(checkEnts) > 0) {
+		return
 	}
 
-	l.applied = applied
-}
-
-func (l *RaftLog) modifyStabled(stabled uint64) {
-	if stabled < l.stabled || stabled > l.lastIndex || stabled < l.firstIndex {
-		log.Panicf("stabled(%d) < stabled(%d) or stabled(%d) > lastIndex(%d) or stabled(%d) < firstIndex(%d)", stabled, l.stabled, stabled, l.lastIndex, stabled, l.firstIndex)
+	for len(l.entries) > 0 && preLogIndex < l.LastIndex() {
+		l.entries = l.entries[:len(l.entries)-1]
 	}
 
-	l.stabled = stabled
-}
+	l.stableTo(min(l.stabled, preLogIndex))
 
-func (l *RaftLog) appendLog(ents []*pb.Entry) {
 	for _, ent := range ents {
+		preLogIndex++
+		ent.Index = preLogIndex
 		l.entries = append(l.entries, *ent)
-		// l.lastIndex++
 	}
 }
 
@@ -111,16 +145,18 @@ func newLog(storage Storage) *RaftLog {
 		panic(err)
 	}
 
-	return &RaftLog{
-		storage:         storage,
-		firstIndex:      firstIndex,
-		lastIndex:       lastIndex,
-		committed:       0,
-		applied:         0,
-		stabled:         lastIndex,
-		entries:         entries,
-		pendingSnapshot: nil,
+	hardState, _, _ := storage.InitialState()
+
+	log := &RaftLog{
+		storage: storage,
+		entries: entries,
 	}
+
+	log.committed = hardState.Commit
+	log.applied = firstIndex - 1
+	log.stabled = lastIndex
+	log.firstIndex = firstIndex
+	return log
 }
 
 // We need to compact the log entries in some point of time like
@@ -135,77 +171,158 @@ func (l *RaftLog) maybeCompact() {
 // note, this is one of the test stub functions you need to implement.
 func (l *RaftLog) allEntries() []pb.Entry {
 	// Your Code Here (2A).
-	lastindex, err := l.storage.LastIndex()
-
+	stableFirstIndex, err := l.storage.FirstIndex()
 	if err != nil {
 		panic(err)
 	}
 
-	if lastindex < l.firstIndex {
-		return nil
+	entries, err := l.storage.Entries(stableFirstIndex, l.stabled+1)
+	if err != nil {
+		panic(err)
 	}
 
-	return l.entries[:]
+	entries = append(entries, l.unstableEntries()...)
+
+	return entries
 }
 
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
-	// Your Code Here (2A).
 	if len(l.entries) == 0 {
 		return nil
 	}
 
-	return l.entries[l.stabled-l.firstIndex:]
+	return l.entries[l.stabled-l.firstIndex+1:]
 }
 
 // nextEnts returns all the committed but not applied entries
-func (l *RaftLog) nextEnts() (ents []pb.Entry) {
+// 也就是 [applied + 1, committed] 之间的日志
+func (l *RaftLog) nextEnts() []pb.Entry {
 	// Your Code Here (2A).
-	return l.entries[l.applied-l.firstIndex : l.committed-l.firstIndex]
+	return pointer2entry(l.Entries(l.applied+1, l.committed+1))
 }
 
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	return l.lastIndex
+
+	if len(l.entries) == 0 {
+		return l.stabled
+	}
+
+	return l.firstIndex - 1 + uint64(len(l.entries))
 }
 
 func (l *RaftLog) LastEntry() *pb.Entry {
-	if len(l.entries) == 0 {
-		lastindex, err := l.storage.LastIndex()
-		if err != nil {
-			return &pb.Entry{}
-		}
-		ents, err := l.storage.Entries(lastindex, lastindex+1)
-		if err != nil {
-			return &pb.Entry{}
-		}
-		return &ents[0]
+	lastIndex := l.LastIndex()
+
+	entry := l.Entries(lastIndex, lastIndex+1)
+
+	if len(entry) == 0 {
+		return nil
 	}
 
-	return &l.entries[len(l.entries)-1]
+	return entry[0]
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	if i > l.lastIndex {
-		log.Panicf("term(%d) > lastIndex(%d)", i, l.lastIndex)
+	ent := l.Entries(i, i+1)
+
+	if len(ent) == 0 {
+		return 0, nil
 	}
 
-	if i >= l.firstIndex {
-		return l.entries[i-l.firstIndex].Term, nil
+	return ent[0].Term, nil
+}
+
+func (l *RaftLog) Entries(lo, hi uint64) []*pb.Entry {
+	ents := make([]*pb.Entry, 0)
+
+	if lo <= l.stabled {
+		entries, err := l.storage.Entries(lo, min(hi, l.stabled+1))
+		if err != nil {
+			// log.Print(err.Error())
+			return []*pb.Entry{}
+		}
+
+		for _, entry := range entries {
+			ents = append(ents, &entry)
+		}
 	}
 
-	return l.storage.Term(i)
+	if hi > l.stabled {
+		err := mustCheckOutOfBounds(l.entries, max(lo, l.stabled+1), hi, l.firstIndex)
+		if err != nil {
+			// log.Printf("err: %s, maybe unexist entry", err.Error())
+			return []*pb.Entry{}
+		}
+
+		entries := slice(l.entries, max(lo, l.stabled+1), hi, l.firstIndex)
+
+		for _, entry := range entries {
+			ents = append(ents, &entry)
+		}
+	}
+
+	return ents
 }
 
 func (l *RaftLog) LastTerm() uint64 {
 	// Your Code Here (2A).
-	term, err := l.Term(l.lastIndex)
+	term, err := l.Term(l.LastIndex())
 	if err != nil {
 		panic(err)
 	}
-
 	return term
+}
+
+func pointer2entry(ents []*pb.Entry) []pb.Entry {
+	if ents == nil {
+		return nil
+	}
+
+	entries := make([]pb.Entry, len(ents))
+	for i, ent := range ents {
+		entries[i] = *ent
+	}
+	return entries
+}
+
+func entry2pointer(ents []pb.Entry) []*pb.Entry {
+	if ents == nil {
+		return nil
+	}
+
+	entries := make([]*pb.Entry, len(ents))
+	for i, ent := range ents {
+		entries[i] = &ent
+	}
+	return entries
+}
+
+func slice(entries []pb.Entry, lo uint64, hi uint64, firstIndex uint64) []pb.Entry {
+	if err := mustCheckOutOfBounds(entries, lo, hi, firstIndex); err != nil {
+		log.Panic(err.Error())
+	}
+	// NB: use the full slice expression to limit what the caller can do with the
+	// returned slice. For example, an append will reallocate and copy this slice
+	// instead of corrupting the neighbouring u.entries.
+	return entries[lo-firstIndex : hi-firstIndex : hi-firstIndex]
+}
+
+// u.offset <= lo <= hi <= u.offset+len(u.entries)
+func mustCheckOutOfBounds(entries []pb.Entry, lo, hi uint64, firstIndex uint64) error {
+	if lo > hi {
+		return fmt.Errorf("invalid unstable.slice %d > %d", lo, hi)
+	}
+
+	upper := firstIndex + uint64(len(entries))
+
+	if lo < firstIndex || hi > upper {
+		return fmt.Errorf("unstable.slice[%d,%d) out of bound [%d,%d]", lo, hi, firstIndex, upper)
+	}
+
+	return nil
 }

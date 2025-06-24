@@ -70,13 +70,19 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+	lastSoftState SoftState
+	lastHardState pb.HardState
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
+	raft := newRaft(config)
+
 	return &RawNode{
-		Raft: newRaft(config),
+		Raft:          raft,
+		lastSoftState: SoftState{Lead: raft.Lead, RaftState: raft.State},
+		lastHardState: pb.HardState{Vote: raft.Vote, Term: raft.Term, Commit: raft.RaftLog.committed},
 	}, nil
 }
 

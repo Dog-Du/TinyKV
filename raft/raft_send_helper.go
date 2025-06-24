@@ -1,6 +1,8 @@
 package raft
 
 import (
+	"log"
+
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -14,20 +16,29 @@ func (r *Raft) send(m pb.Message) bool {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
+	index := r.Prs[to].Next
+	term, err := r.RaftLog.Term(index - 1)
+
+	if err != nil {
+		log.Print(err.Error())
+		return false
+	}
+
+	ents := r.RaftLog.Entries(index, r.RaftLog.LastIndex()+1)
 
 	return r.send(pb.Message{
 		To:      to,
 		From:    r.id,
 		Term:    r.Term,
 		MsgType: pb.MessageType_MsgAppend,
-		Index:   r.RaftLog.LastIndex(),
-		LogTerm: r.RaftLog.LastTerm(),
-		Entries: []*pb.Entry{r.RaftLog.LastEntry()},
+		Index:   index - 1,
+		LogTerm: term,
+		Entries: ents,
 		Commit:  r.RaftLog.committed,
 	})
 }
 
-func (r *Raft) sendAppendResponse(to uint64, agree bool, ent []*pb.Entry, ent1 []pb.Entry) bool {
+func (r *Raft) sendAppendResponse(to uint64, agree bool, term uint64, ent []*pb.Entry, ent1 []pb.Entry) bool {
 	if ent == nil {
 		ent = make([]*pb.Entry, 0)
 	}
@@ -43,7 +54,7 @@ func (r *Raft) sendAppendResponse(to uint64, agree bool, ent []*pb.Entry, ent1 [
 	return r.send(pb.Message{
 		To:      to,
 		From:    r.id,
-		Term:    r.Term,
+		Term:    term,
 		Reject:  !agree,
 		MsgType: pb.MessageType_MsgAppendResponse,
 		Index:   r.RaftLog.LastIndex(),
@@ -58,7 +69,7 @@ func (r *Raft) sendHeartbeat(to uint64) bool {
 		From:    r.id,
 		Term:    r.Term,
 		MsgType: pb.MessageType_MsgHeartbeat,
-		Commit:  min(r.Prs[to].Match, r.RaftLog.committed),
+		Commit:  r.RaftLog.committed,
 	})
 }
 
@@ -67,6 +78,7 @@ func (r *Raft) sendHeartbeatResponse(to uint64) bool {
 		To:      to,
 		From:    r.id,
 		Term:    r.Term,
+		Commit:  r.RaftLog.committed,
 		MsgType: pb.MessageType_MsgHeartbeatResponse,
 	})
 }

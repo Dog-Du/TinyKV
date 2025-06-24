@@ -236,6 +236,9 @@ func newRaft(c *Config) *Raft {
 	}
 
 	raft.resetElapsed()
+	hardstate, _, _ := raft.RaftLog.storage.InitialState()
+	raft.Term = hardstate.Term
+	raft.Vote = hardstate.Vote
 	return raft
 }
 
@@ -265,10 +268,17 @@ func (r *Raft) tick() {
 				continue
 			}
 			r.sendHeartbeat(peer.id)
+			// r.sendAppend(peer.id)
 		}
 
 		r.resetElapsed()
 	}
+}
+
+func appendLog(r *Raft, ents []*pb.Entry, preLogTerm uint64, preLogIndex uint64) {
+	r.RaftLog.appendLog(ents, preLogTerm, preLogIndex)
+	r.Prs[r.id].Match = max(r.Prs[r.id].Match, r.RaftLog.LastIndex())
+	r.Prs[r.id].Next = r.Prs[r.id].Match + 1
 }
 
 // becomeFollower transform this peer's state to Follower
@@ -304,6 +314,14 @@ func (r *Raft) becomeLeader() {
 	r.votes = make(map[uint64]bool) // 清空
 
 	r.resetElapsed()
+
+	for _, peer := range r.Prs {
+		peer.Match = 0
+		peer.Next = r.RaftLog.LastIndex() + 1
+	}
+
+	// 添加一个空条目
+	appendLog(r, []*pb.Entry{{Term: r.Term, Index: r.RaftLog.LastIndex() + 1, Data: nil}}, r.Term, r.RaftLog.LastIndex())
 }
 
 func (r *Raft) canBeLeader() bool {
@@ -323,6 +341,71 @@ func (r *Raft) canBeLeader() bool {
 	}
 
 	return cnt > len(r.Prs)/2
+}
+
+// 判断是否可以成为 leader，如果可以，则成为 leader 并发出 propose，并返回 true，否则返回 false。
+func becomeLeader(r *Raft, term uint64) bool {
+	if !r.canBeLeader() {
+		if len(r.votes) >= len(r.Prs) {
+			r.becomeFollower(term, None) // 选举失败，变成 follower
+		}
+		return false
+	}
+
+	r.becomeLeader()
+
+	for _, peer := range r.Prs {
+		if peer.id == r.id {
+			continue
+		}
+		r.sendAppend(peer.id)
+	}
+
+	return true
+}
+
+func leaderCommit(r *Raft, index uint64) bool {
+	if r.State != StateLeader {
+		log.Panicf("leaderCommit called in %s state", r.State.String())
+	}
+
+	if r.RaftLog.LastIndex() < index {
+		return false
+	}
+
+	log_term, err := r.RaftLog.Term(index)
+	if err != nil {
+		log.Panicf("leaderCommit called with invalid index: %d, err : %s", index, err.Error())
+	}
+	if log_term < r.Term {
+		return false
+	}
+
+	cnt := 0
+	for _, peer := range r.Prs {
+		if peer.id == r.id {
+			continue
+		}
+
+		if r.Prs[peer.id].Match >= index {
+			cnt++
+		}
+	}
+
+	if cnt >= len(r.Prs)/2 && r.RaftLog.committed < index {
+		r.RaftLog.commitTo(index, index)
+
+		for _, peer := range r.Prs {
+			if peer.id == r.id {
+				continue
+			}
+			r.sendAppend(peer.id) // 广播，通知已经提交了
+		}
+
+		return true
+	}
+
+	return false
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -406,10 +489,29 @@ func (r *Raft) Step(m pb.Message) error {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) error {
 	// Your Code Here (2A).
+	if r.Term > m.Term {
+		r.sendAppendResponse(m.From, false, m.Term, nil, nil)
+		return nil
+	}
 
 	r.becomeFollower(m.Term, m.From)
-	r.RaftLog.appendLog(m.Entries)
-	r.sendAppendResponse(m.From, true, m.Entries, nil)
+
+	if ent := r.RaftLog.Entries(m.Index, m.Index+1); r.State != StateLeader && m.Index > 0 && (len(ent) == 0 || ent[0].Term != m.LogTerm) {
+		r.sendAppendResponse(m.From, false, r.Term, nil, nil)
+		return nil
+	}
+
+	appendLog(r, m.Entries, m.LogTerm, m.Index)
+	r.sendAppendResponse(m.From, true, r.Term, m.Entries, nil)
+
+	// 如果消息带了新日志条目，last new entry index 就是新日志的最大 index
+	// 如果消息没带新日志条目，last new entry index 就是 prevLogIndex
+	if len(m.Entries) == 0 {
+		r.RaftLog.commitTo(m.Commit, m.Index)
+	} else {
+		r.RaftLog.commitTo(m.Commit, m.Entries[len(m.Entries)-1].Index)
+	}
+
 	return nil
 }
 
@@ -426,6 +528,7 @@ func (r *Raft) handleBeat(m pb.Message) error {
 		}
 
 		r.sendHeartbeat(peer.id)
+		// r.sendAppend(peer.id)
 	}
 
 	return nil
@@ -434,8 +537,9 @@ func (r *Raft) handleBeat(m pb.Message) error {
 // handleHeartbeat handle Heartbeat RPC request
 func (r *Raft) handleHeartbeat(m pb.Message) error {
 	// Your Code Here (2A).
-	if r.State == StateLeader && r.Term <= m.Term {
-		log.Panicf("handleHeartbeat called in leader state")
+
+	if r.Term > m.Term {
+		return nil
 	}
 
 	if r.Term <= m.Term {
@@ -465,20 +569,7 @@ func (r *Raft) handleHup(m pb.Message) error {
 	r.votes[r.id] = true
 	r.Vote = r.id
 
-	if r.canBeLeader() {
-		r.becomeLeader()
-
-		for _, peer := range r.Prs {
-			peer.Match = 0
-			peer.Next = r.RaftLog.LastIndex() + 1
-
-			if peer.id == r.id {
-				continue
-			}
-
-			r.sendPropose(peer.id, nil, nil)
-		}
-	}
+	becomeLeader(r, r.Term)
 
 	return nil
 }
@@ -486,13 +577,16 @@ func (r *Raft) handleHup(m pb.Message) error {
 func (r *Raft) handleRequestVote(m pb.Message) error {
 	agree := false
 
-	// 如果候选人收到其他候选人的拉票、而且拉票的任期编号不小于自己的任期编号，就会自认落选，成为追随者，并认定来拉票的候选人为领袖。from wiki
-
 	if r.Term < m.Term {
 		// 如果 term 小，说明发生了一个新的 election，那么直接成为这个候选者的 follower，并投票，相当于给第一个选举的节点投票
-		r.becomeFollower(m.Term, m.From)
-		r.Vote = m.From
-		agree = true
+		r.becomeFollower(m.Term, None)
+	}
+
+	// 如果候选人收到其他候选人的拉票、而且拉票的任期编号不小于自己的任期编号，就会自认落选，成为追随者，并认定来拉票的候选人为领袖。from wiki
+	if r.RaftLog.LastTerm() > m.LogTerm { // 如果拉票的任期编号大于自己的任期编号，则拒绝
+		agree = false
+	} else if r.RaftLog.LastTerm() == m.LogTerm && r.RaftLog.LastIndex() > m.Index { // 相等的时候比较索引，如果索引不同，则拒绝。
+		agree = false
 	} else if r.Term > m.Term {
 		// 如果 m.term 小于当前 r.term，则拒绝
 		agree = false
@@ -503,7 +597,7 @@ func (r *Raft) handleRequestVote(m pb.Message) error {
 		agree = false
 	} else if r.State == StateFollower {
 		// 现在 term 相同，同时没投过票
-		r.becomeFollower(m.Term, m.From)
+		r.becomeFollower(m.Term, None)
 		r.Vote = m.From
 		agree = true
 	} else {
@@ -517,27 +611,15 @@ func (r *Raft) handleRequestVote(m pb.Message) error {
 		agree = false
 	}
 
-	r.sendRequestVoteResponse(m.From, m.Term, agree)
+	r.sendRequestVoteResponse(m.From, r.Term, agree)
 	return nil
 }
 
 func (r *Raft) handleRequestVoteResponse(m pb.Message) error {
 	if r.State == StateCandidate {
 		r.votes[m.From] = !m.Reject
-		if r.canBeLeader() {
-			r.becomeLeader()
 
-			for _, peer := range r.Prs {
-				peer.Match = 0
-				peer.Next = r.RaftLog.LastIndex() + 1
-
-				if peer.id == r.id {
-					continue
-				}
-
-				r.sendPropose(peer.id, nil, nil)
-			}
-		}
+		becomeLeader(r, m.Term)
 	}
 
 	return nil
@@ -550,41 +632,55 @@ func (r *Raft) handleSnapshot(m pb.Message) error {
 }
 
 func (r *Raft) handleHeartbeatResponse(m pb.Message) error {
+	if r.Term < m.Term {
+		r.becomeFollower(m.Term, None)
+	}
+
+	if m.Commit < r.RaftLog.committed {
+		r.sendAppend(m.From)
+	}
+
 	return nil
 }
 
 func (r *Raft) handlePropose(m pb.Message) error {
 	if r.State != StateLeader {
-		// log.Printf("handlePropose called in %s state", r.State.String())
-		r.becomeFollower(m.Term, m.From) //
-		return nil
+		return ErrProposalDropped
 	}
 
-	// // 如果 term 小于等于当前 term，并且 state 是 leader，并且 from 不是自己，则成为 candidate
-	// // 因为这说明，集群里面出现了两个 leader，
-	// if r.Term <= m.Term && r.State == StateLeader && m.From != r.id {
-	// 	r.Vote = None
-	// 	r.State = StateCandidate
-	// 	r.resetElapsed()
+	for _, ent := range m.Entries {
+		ent.Term = r.Term
+	}
 
-	// 	r.votes = make(map[uint64]bool) // 清空
-	// 	r.becomeCandidate()
-	// 	return nil
-	// }
+	appendLog(r, m.Entries, r.Term, r.RaftLog.LastIndex())
 
 	for _, peer := range r.Prs {
 		if peer.id == r.id {
 			continue
 		}
-		r.sendPropose(peer.id, m.Entries, nil)
+
+		r.sendAppend(peer.id)
 	}
 
-	r.RaftLog.appendLog(m.Entries)
-
+	leaderCommit(r, r.RaftLog.LastIndex())
 	return nil
 }
 
 func (r *Raft) handleAppendResponse(m pb.Message) error {
+	if r.Term > m.Term {
+		return nil
+	}
+
+	if m.Reject {
+		r.Prs[m.From].Next--
+		r.sendAppend(m.From)
+		return nil
+	}
+
+	r.Prs[m.From].Match = max(r.Prs[m.From].Match, min(r.RaftLog.LastIndex(), m.Index))
+	r.Prs[m.From].Next = r.Prs[m.From].Match + 1
+
+	leaderCommit(r, m.Index)
 	return nil
 }
 
