@@ -55,8 +55,8 @@ type Ready struct {
 	Snapshot pb.Snapshot
 
 	// CommittedEntries specifies entries to be committed to a
-	// store/state-machine. These have previously been committed to stable
-	// store.
+	// store/state-machine. These have prevously been committed to stable
+	// store.i
 	CommittedEntries []pb.Entry
 
 	// Messages specifies outbound messages to be sent AFTER Entries are
@@ -70,7 +70,7 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
-	lastSoftState SoftState
+	lastSoftState *SoftState // 用来判断是否状态发生了变化，所以和 Ready 保持一致
 	lastHardState pb.HardState
 }
 
@@ -81,8 +81,8 @@ func NewRawNode(config *Config) (*RawNode, error) {
 
 	return &RawNode{
 		Raft:          raft,
-		lastSoftState: SoftState{Lead: raft.Lead, RaftState: raft.State},
-		lastHardState: pb.HardState{Vote: raft.Vote, Term: raft.Term, Commit: raft.RaftLog.committed},
+		lastSoftState: nil,
+		lastHardState: pb.HardState{},
 	}, nil
 }
 
@@ -150,20 +150,80 @@ func (rn *RawNode) Step(m pb.Message) error {
 
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
-	// Your Code Here (2A).
-	return Ready{}
+	var rd Ready
+
+	ss := &SoftState{Lead: rn.Raft.Lead, RaftState: rn.Raft.State}
+	if rn.lastSoftState != nil && *rn.lastSoftState != *ss {
+		rd.SoftState = ss
+	}
+
+	hs := pb.HardState{Term: rn.Raft.Term, Vote: rn.Raft.Vote, Commit: rn.Raft.RaftLog.committed}
+	if !isHardStateEqual(rn.lastHardState, hs) && !IsEmptyHardState(rn.lastHardState) {
+		rd.HardState = hs
+	}
+
+	if len(rn.Raft.msgs) > 0 {
+		rd.Messages = rn.Raft.msgs
+	}
+
+	rd.Entries = rn.Raft.RaftLog.unstableEntries()
+	rd.CommittedEntries = rn.Raft.RaftLog.nextEnts()
+	rd.Snapshot = pb.Snapshot{}
+
+	rn.Raft.msgs = make([]pb.Message, 0)
+	rn.lastHardState = rd.HardState
+	rn.lastSoftState = rd.SoftState
+	return rd
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
-	// Your Code Here (2A).
-	return false
+	ss := &SoftState{Lead: rn.Raft.Lead, RaftState: rn.Raft.State}
+	if rn.lastSoftState != nil && *rn.lastSoftState != *ss {
+		return true 
+	}
+
+	hs := pb.HardState{Term: rn.Raft.Term, Vote: rn.Raft.Vote, Commit: rn.Raft.RaftLog.committed}
+	if !isHardStateEqual(rn.lastHardState, hs) && !IsEmptyHardState(rn.lastHardState) {
+		return true 
+	}
+
+	if len(rn.Raft.RaftLog.unstableEntries()) > 0 {
+		return true 
+	}
+
+	if len(rn.Raft.RaftLog.nextEnts()) > 0 {
+		return true 
+	}
+
+	if len(rn.Raft.RaftLog.nextEnts()) > 0 {
+		return true 
+	}
+
+	if len(rn.Raft.msgs) > 0 {
+		return true 
+	}
+
+	// TODO: snapshot
+
+	return false 
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
-	// Your Code Here (2A).
+	if len(rd.Entries) > 0 {
+		last := rd.Entries[len(rd.Entries)-1]
+		rn.Raft.RaftLog.stableTo(last.Index)
+	}
+
+	if len(rd.CommittedEntries) > 0 {
+		last := rd.CommittedEntries[len(rd.CommittedEntries)-1]
+		rn.Raft.RaftLog.appliedTo(last.Index)
+	}
+
+	rn.lastHardState = rd.HardState
+	rn.lastSoftState = rd.SoftState
 }
 
 // GetProgress return the Progress of this node and its peers, if this

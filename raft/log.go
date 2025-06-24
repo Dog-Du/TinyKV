@@ -283,9 +283,9 @@ func pointer2entry(ents []*pb.Entry) []pb.Entry {
 		return nil
 	}
 
-	entries := make([]pb.Entry, len(ents))
-	for i, ent := range ents {
-		entries[i] = *ent
+	entries := make([]pb.Entry, 0, 2)
+	for _, ent := range ents {
+		entries = append(entries, *ent)	
 	}
 	return entries
 }
@@ -295,9 +295,9 @@ func entry2pointer(ents []pb.Entry) []*pb.Entry {
 		return nil
 	}
 
-	entries := make([]*pb.Entry, len(ents))
-	for i, ent := range ents {
-		entries[i] = &ent
+	entries := make([]*pb.Entry, 0, 2)
+	for _, ent := range ents {
+		entries = append(entries, &ent)
 	}
 	return entries
 }

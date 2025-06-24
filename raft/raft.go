@@ -361,6 +361,7 @@ func becomeLeader(r *Raft, term uint64) bool {
 		r.sendAppend(peer.id)
 	}
 
+	leaderCommit(r, r.RaftLog.LastIndex())
 	return true
 }
 
