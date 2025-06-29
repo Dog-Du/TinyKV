@@ -280,3 +280,28 @@ func NewLogger(w io.Writer, prefix string) *Logger {
 	}
 	return &Logger{_log: log.New(w, prefix, LstdFlags), level: level, highlighting: true}
 }
+
+const debug = 0
+const debug_raft = 1
+const debug_raftStore = 1
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if debug > 0 {
+		Debugf(format, a...)
+	}
+	return
+}
+
+func DPrintfRaft(format string, a ...interface{}) (n int, err error) {
+	if debug_raft > 0 {
+		Debugf("[Raft]: "+format, a...)
+	}
+	return
+}
+
+func DPrintfRaftStore(format string, a ...interface{}) (n int, err error) {
+	if debug_raftStore > 0 {
+		Debugf("[RaftStore]: "+format, a...)
+	}
+	return
+}

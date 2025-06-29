@@ -142,6 +142,14 @@ func confchanger(t *testing.T, cluster *Cluster, ch chan bool, done *int32) {
 // - If maxraftlog is a positive number, the count of the persistent log for Raft shouldn't exceed 2*maxraftlog.
 // - If confchange is set, the cluster will schedule random conf change concurrently.
 // - If split is set, split region when size exceed 1024 bytes.
+// 基本测试描述如下： 一个或多个客户端在一段时间内向一组服务器提交 Put（写入） / Scan（扫描）操作。
+// 在该时间段结束后，测试会检查特定键（key）的所有连续值（sequential values）是否都已按序存在，并执行 Delete（删除）操作进行清理。
+// 如果设置了 unreliable (不可靠)： RPC 调用可能会失败。
+// 如果设置了 crash (崩溃)： 服务器会在该时间段结束后重启。
+// 如果设置了 partitions (分区)： 测试会在服务器之间并发地进行网络分区。
+// 如果 maxraftlog (最大raft日志) 是一个正数： Raft 持久化日志的数量不应超过 2 * maxraftlog。
+// 如果设置了 confchange (配置变更)： 集群将并发地调度随机的配置变更（conf change）。
+// 如果设置了 split (分裂)： 当区域（region）大小超过 1024 字节时，分裂该区域。
 func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash bool, partitions bool, maxraftlog int, confchange bool, split bool) {
 	title := "Test: "
 	if unreliable {
@@ -193,6 +201,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 	for i := 0; i < nclients; i++ {
 		clnts[i] = make(chan int, 1)
 	}
+
 	for i := 0; i < 3; i++ {
 		// log.Printf("Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
@@ -204,17 +213,21 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			}()
 			last := ""
 			for atomic.LoadInt32(&done_clients) == 0 {
-				if (rand.Int() % 1000) < 500 {
+				if (rand.Int() % 1000) < 500 { // put 操作
 					key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 					value := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
-					// log.Infof("%d: client new put %v,%v\n", cli, key, value)
+
+					// log.Infof("[%d:] client new put %v,%v\n", cli, key, value)
+
 					cluster.MustPut([]byte(key), []byte(value))
 					last = NextValue(last, value)
 					j++
-				} else {
+				} else { // scan 操作用来检查是否相符
 					start := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", 0)
 					end := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
-					// log.Infof("%d: client new scan %v-%v\n", cli, start, end)
+
+					// log.Infof("[%d:] client new scan %v-%v\n", cli, start, end)
+
 					values := cluster.Scan([]byte(start), []byte(end))
 					v := string(bytes.Join(values, []byte("")))
 					if v != last {
@@ -738,4 +751,40 @@ func TestSplitConfChangeSnapshotUnreliableRecover3B(t *testing.T) {
 func TestSplitConfChangeSnapshotUnreliableRecoverConcurrentPartition3B(t *testing.T) {
 	// Test: unreliable net, restarts, partitions, snapshots, conf change, many clients (3B) ...
 	GenericTest(t, "3B", 5, true, true, true, 100, true, true)
+}
+
+func TestMySimpleTest(t *testing.T) {
+	nclients := 1
+	nservers := 2
+	cfg := config.NewTestConfig()
+
+	cluster := NewTestCluster(nservers, cfg)
+	cluster.Start()
+	defer cluster.Shutdown()
+
+	electionTimeout := cfg.RaftBaseTickInterval * time.Duration(cfg.RaftElectionTimeoutTicks)
+	// Wait for leader election
+	time.Sleep(2 * electionTimeout)
+
+	clnts := make([]chan int, nclients)
+	for i := 0; i < nclients; i++ {
+		clnts[i] = make(chan int, 1)
+	}
+
+	for i := 0; i < 1; i++ {
+		key := []byte("dogdu")
+		value := []byte("xixixi")
+		cluster.MustPut(key, value)
+
+		start_key := key
+		end_key := []byte("zzzzzzz")
+
+		values := cluster.Scan(start_key, end_key)
+
+		fmt.Printf("value: %v, get values: ", string(value))
+
+		for _, v := range values {
+			fmt.Printf("%v, ", string(v))
+		}
+	}
 }

@@ -16,9 +16,11 @@ package raft
 
 import (
 	"errors"
-	"log"
 	"math/rand"
 
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
+
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -208,13 +210,28 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
-
 	prs := make(map[uint64]*Progress)
-	for _, peer := range c.peers {
-		prs[peer] = &Progress{
-			Match: 0,
-			Next:  0,
-			id:    peer,
+	hardstate, confstate, err := c.Storage.InitialState()
+
+	if err != nil {
+		panic(err.Error())
+	}
+
+	if len(c.peers) > 0 {
+		for _, peer := range c.peers {
+			prs[peer] = &Progress{
+				Match: 0,
+				Next:  0,
+				id:    peer,
+			}
+		}
+	} else {
+		for _, peer := range confstate.Nodes {
+			prs[peer] = &Progress{
+				Match: 0,
+				Next:  0,
+				id:    peer,
+			}
 		}
 	}
 
@@ -236,7 +253,6 @@ func newRaft(c *Config) *Raft {
 	}
 
 	raft.resetElapsed()
-	hardstate, _, _ := raft.RaftLog.storage.InitialState()
 	raft.Term = hardstate.Term
 	raft.Vote = hardstate.Vote
 	return raft
@@ -277,6 +293,16 @@ func (r *Raft) tick() {
 
 func appendLog(r *Raft, ents []*pb.Entry, preLogTerm uint64, preLogIndex uint64) {
 	r.RaftLog.appendLog(ents, preLogTerm, preLogIndex)
+
+	// Ensure the current node's progress exists
+	if r.Prs[r.id] == nil {
+		r.Prs[r.id] = &Progress{
+			Match: 0,
+			Next:  1,
+			id:    r.id,
+		}
+	}
+
 	r.Prs[r.id].Match = max(r.Prs[r.id].Match, r.RaftLog.LastIndex())
 	r.Prs[r.id].Next = r.Prs[r.id].Match + 1
 }
@@ -358,6 +384,7 @@ func becomeLeader(r *Raft, term uint64) bool {
 		if peer.id == r.id {
 			continue
 		}
+
 		r.sendAppend(peer.id)
 	}
 
@@ -367,7 +394,8 @@ func becomeLeader(r *Raft, term uint64) bool {
 
 func leaderCommit(r *Raft, index uint64) bool {
 	if r.State != StateLeader {
-		log.Panicf("leaderCommit called in %s state", r.State.String())
+		log.Infof("leaderCommit called in %s state", r.State.String())
+		return false
 	}
 
 	if r.RaftLog.LastIndex() < index {
@@ -378,6 +406,7 @@ func leaderCommit(r *Raft, index uint64) bool {
 	if err != nil {
 		log.Panicf("leaderCommit called with invalid index: %d, err : %s", index, err.Error())
 	}
+
 	if log_term < r.Term {
 		return false
 	}
@@ -393,7 +422,7 @@ func leaderCommit(r *Raft, index uint64) bool {
 		}
 	}
 
-	if cnt >= len(r.Prs)/2 && r.RaftLog.committed < index {
+	if cnt+1 > len(r.Prs)/2 && r.RaftLog.committed < index {
 		r.RaftLog.commitTo(index, index)
 
 		for _, peer := range r.Prs {
@@ -413,6 +442,8 @@ func leaderCommit(r *Raft, index uint64) bool {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
+
+	log.DPrintfRaft("[raft[%d](state:%s)] receive %s, term: %d, commit: %d, index: %d, reject: %v\n", r.id, r.State.String(), m.MsgType.String(), m.Term, m.Commit, m.Index, m.Reject)
 	switch m.MsgType {
 	// 'MessageType_MsgHup' is a local message used for election. If an election timeout happened,
 	// the node should pass 'MessageType_MsgHup' to its Step method and start a new election.
@@ -491,19 +522,31 @@ func (r *Raft) Step(m pb.Message) error {
 func (r *Raft) handleAppendEntries(m pb.Message) error {
 	// Your Code Here (2A).
 	if r.Term > m.Term {
-		r.sendAppendResponse(m.From, false, m.Term, nil, nil)
 		return nil
 	}
 
 	r.becomeFollower(m.Term, m.From)
 
-	if ent := r.RaftLog.Entries(m.Index, m.Index+1); r.State != StateLeader && m.Index > 0 && (len(ent) == 0 || ent[0].Term != m.LogTerm) {
-		r.sendAppendResponse(m.From, false, r.Term, nil, nil)
-		return nil
+	if m.Index > r.RaftLog.LastIndex() {
+		// index 不存在
+		return r.sendAppendResponse(m.From, false, 0, r.RaftLog.LastIndex(), nil, nil)
+	}
+
+	term, err := r.RaftLog.Term(m.Index)
+	if err != nil || term != m.LogTerm {
+		// term 不对应， 需要返回 firstindexof term
+		conflictTerm := uint64(0)
+		conflictIndex := m.Index
+		
+		if err == nil {
+			conflictTerm = term
+			conflictIndex = r.RaftLog.findFirstIndexOfTerm(conflictTerm)
+		}
+		return r.sendAppendResponse(m.From, false, conflictTerm, conflictIndex, nil, nil)
 	}
 
 	appendLog(r, m.Entries, m.LogTerm, m.Index)
-	r.sendAppendResponse(m.From, true, r.Term, m.Entries, nil)
+	r.sendAppendResponse(m.From, true, r.Term, r.RaftLog.LastIndex(), m.Entries, nil)
 
 	// 如果消息带了新日志条目，last new entry index 就是新日志的最大 index
 	// 如果消息没带新日志条目，last new entry index 就是 prevLogIndex
@@ -519,7 +562,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) error {
 // 给所有人发一个heartbeat，用于leader检查自己是否是最新。
 func (r *Raft) handleBeat(m pb.Message) error {
 	if r.State != StateLeader {
-		log.Printf("handleBeat called in %s state", r.State.String())
+		log.DPrintfRaft("handleBeat called in %s state", r.State.String())
 		return nil
 	}
 
@@ -528,7 +571,7 @@ func (r *Raft) handleBeat(m pb.Message) error {
 			continue
 		}
 
-		r.sendHeartbeat(peer.id)
+		_ = r.sendHeartbeat(peer.id) // 忽视
 		// r.sendAppend(peer.id)
 	}
 
@@ -547,13 +590,12 @@ func (r *Raft) handleHeartbeat(m pb.Message) error {
 		r.becomeFollower(m.Term, m.From)
 	}
 
-	r.sendHeartbeatResponse(m.From)
-	return nil
+	return r.sendHeartbeatResponse(m.From)
 }
 
 func (r *Raft) handleHup(m pb.Message) error {
 	if r.State == StateLeader {
-		log.Printf("handleHup called in leader state")
+		log.DPrintfRaft("handleHup called in leader state")
 		return nil
 	}
 
@@ -564,7 +606,7 @@ func (r *Raft) handleHup(m pb.Message) error {
 			continue
 		}
 
-		r.sendRequestVote(peer.id)
+		_ = r.sendRequestVote(peer.id) // 忽视
 	}
 
 	r.votes[r.id] = true
@@ -594,7 +636,7 @@ func (r *Raft) handleRequestVote(m pb.Message) error {
 	} else if r.Vote != None && r.Vote != m.From {
 		// 如果这个 term 已经投过票，并且不是给这个节点投票，则拒绝
 		// 如果是当前状态 candidate， 会经过这个分支。
-		log.Printf("raft %d has vote %d, reject vote from %d", r.id, r.Vote, m.From)
+		log.DPrintfRaft("raft %d has vote %d, reject vote from %d", r.id, r.Vote, m.From)
 		agree = false
 	} else if r.State == StateFollower {
 		// 现在 term 相同，同时没投过票
@@ -608,7 +650,7 @@ func (r *Raft) handleRequestVote(m pb.Message) error {
 		}
 
 		// 投票延时到达可能是网络延迟，也可能是其他原因，这里直接拒绝
-		log.Printf("raft %d recive a request vote from %d, may be network latency", r.id, m.From)
+		log.DPrintfRaft("raft %d recive a request vote from %d, may be network latency", r.id, m.From)
 		agree = false
 	}
 
@@ -617,6 +659,11 @@ func (r *Raft) handleRequestVote(m pb.Message) error {
 }
 
 func (r *Raft) handleRequestVoteResponse(m pb.Message) error {
+	if r.Term < m.Term {
+		r.becomeFollower(m.Term, None)
+		return nil
+	}
+
 	if r.State == StateCandidate {
 		r.votes[m.From] = !m.Reject
 
@@ -638,7 +685,7 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) error {
 	}
 
 	if m.Commit < r.RaftLog.committed {
-		r.sendAppend(m.From)
+		return r.sendAppend(m.From)
 	}
 
 	return nil
@@ -646,7 +693,7 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) error {
 
 func (r *Raft) handlePropose(m pb.Message) error {
 	if r.State != StateLeader {
-		return ErrProposalDropped
+		return &util.ErrNotLeader{}
 	}
 
 	for _, ent := range m.Entries {
@@ -660,7 +707,7 @@ func (r *Raft) handlePropose(m pb.Message) error {
 			continue
 		}
 
-		r.sendAppend(peer.id)
+		_ = r.sendAppend(peer.id) // 忽视
 	}
 
 	leaderCommit(r, r.RaftLog.LastIndex())
@@ -668,20 +715,41 @@ func (r *Raft) handlePropose(m pb.Message) error {
 }
 
 func (r *Raft) handleAppendResponse(m pb.Message) error {
-	if r.Term > m.Term {
+	if r.Term < m.Term {
+		r.becomeFollower(m.Term, None)
+		return nil
+	}
+
+	if r.State != StateLeader {
+		return &util.ErrNotLeader{}
+	}
+
+	_, ok := r.Prs[m.From]
+
+	if !ok {
 		return nil
 	}
 
 	if m.Reject {
-		r.Prs[m.From].Next--
-		r.sendAppend(m.From)
-		return nil
+		if m.Term == 0 { // index 不存在
+			r.Prs[m.From].Next = m.Index + 1
+		} else {
+			lastIndexOfTerm := r.RaftLog.findLastIndexOfTerm(m.Term)
+
+			if lastIndexOfTerm != 0 {
+				r.Prs[m.From].Next = lastIndexOfTerm + 1
+			} else {
+				r.Prs[m.From].Next = m.Index
+			}
+		}
+
+		return r.sendAppend(m.From)
 	}
 
 	r.Prs[m.From].Match = max(r.Prs[m.From].Match, min(r.RaftLog.LastIndex(), m.Index))
 	r.Prs[m.From].Next = r.Prs[m.From].Match + 1
 
-	leaderCommit(r, m.Index)
+	leaderCommit(r, r.Prs[m.From].Match)
 	return nil
 }
 

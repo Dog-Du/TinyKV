@@ -16,8 +16,8 @@ package raft
 
 import (
 	"fmt"
-	"log"
 
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -76,8 +76,9 @@ func (l *RaftLog) check() {
 
 // committed and applied are always increasing, so we can use max to update them
 func (l *RaftLog) commitTo(leaderCommit uint64, lastNewIndex uint64) {
+	log.Debugf("commitTo: %d, lastNewIndex: %d, lastcommit: %d", leaderCommit, lastNewIndex, l.committed)
 	l.check()
-	l.committed = min(leaderCommit, lastNewIndex)
+	l.committed = max(min(leaderCommit, lastNewIndex), l.committed)
 	l.check()
 }
 
@@ -96,19 +97,22 @@ func (l *RaftLog) stableTo(index uint64) {
 
 // appendlog always after committo
 func (l *RaftLog) appendLog(ents []*pb.Entry, preLogTerm uint64, preLogIndex uint64) {
-	checkEnts := l.Entries(preLogIndex+1, preLogIndex+1+uint64(len(ents)))
+	checkEnts, err := l.Entries(preLogIndex+1, preLogIndex+1+uint64(len(ents)))
 	appended := true
 
-	for i, ent := range checkEnts {
-		if ent.Term == ents[i].Term && ent.Index == ents[i].Index &&
-			ent.Index == preLogIndex+1 {
-			preLogIndex++
-		} else {
-			appended = false
-			break
+	if err != nil {
+		appended = false
+	} else {
+		for i, ent := range checkEnts {
+			if ent.Term == ents[i].Term && ent.Index == ents[i].Index &&
+				ent.Index == preLogIndex+1 {
+				preLogIndex++
+			} else {
+				appended = false
+				break
+			}
 		}
 	}
-
 	if len(ents) == 0 || (appended && len(checkEnts) > 0) {
 		return
 	}
@@ -145,7 +149,11 @@ func newLog(storage Storage) *RaftLog {
 		panic(err)
 	}
 
-	hardState, _, _ := storage.InitialState()
+	hardState, _, err := storage.InitialState()
+
+	if err != nil {
+		panic(err.Error())
+	}
 
 	log := &RaftLog{
 		storage: storage,
@@ -199,7 +207,13 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 // 也就是 [applied + 1, committed] 之间的日志
 func (l *RaftLog) nextEnts() []pb.Entry {
 	// Your Code Here (2A).
-	return pointer2entry(l.Entries(l.applied+1, l.committed+1))
+
+	ents, err := l.Entries(l.applied+1, l.committed+1)
+	if err != nil {
+		return []pb.Entry{}
+	}
+
+	return pointer2entry(ents)
 }
 
 // LastIndex return the last index of the log entries
@@ -216,9 +230,9 @@ func (l *RaftLog) LastIndex() uint64 {
 func (l *RaftLog) LastEntry() *pb.Entry {
 	lastIndex := l.LastIndex()
 
-	entry := l.Entries(lastIndex, lastIndex+1)
+	entry, err := l.Entries(lastIndex, lastIndex+1)
 
-	if len(entry) == 0 {
+	if err != nil || len(entry) == 0 {
 		return nil
 	}
 
@@ -228,23 +242,57 @@ func (l *RaftLog) LastEntry() *pb.Entry {
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	ent := l.Entries(i, i+1)
+	if i <= l.stabled { // 因为可能变成了快照
+		return l.storage.Term(i)
+	}
+
+	ent, err := l.Entries(i, i+1)
+
+	if err != nil {
+		return 0, err
+	}
 
 	if len(ent) == 0 {
-		return 0, nil
+		return 0, ErrUnavailable
 	}
 
 	return ent[0].Term, nil
 }
 
-func (l *RaftLog) Entries(lo, hi uint64) []*pb.Entry {
+func (l *RaftLog) findFirstIndexOfTerm(term uint64) uint64 {
+	ents := l.allEntries()
+	length := len(ents)
+
+	for i := 0; i < length; i++ {
+		if ents[i].Term == term {
+			return ents[i].Index
+		}
+	}
+
+	return 0
+}
+
+func (l *RaftLog) findLastIndexOfTerm(term uint64) uint64 {
+	ents := l.allEntries()
+	length := len(ents)
+
+	for i := length - 1; i >= 0; i-- {
+		if ents[i].Term == term {
+			return ents[i].Index
+		}
+	}
+
+	return 0
+}
+
+func (l *RaftLog) Entries(lo, hi uint64) ([]*pb.Entry, error) {
 	ents := make([]*pb.Entry, 0)
 
 	if lo <= l.stabled {
 		entries, err := l.storage.Entries(lo, min(hi, l.stabled+1))
 		if err != nil {
 			// log.Print(err.Error())
-			return []*pb.Entry{}
+			return []*pb.Entry{}, err
 		}
 
 		for _, entry := range entries {
@@ -256,7 +304,7 @@ func (l *RaftLog) Entries(lo, hi uint64) []*pb.Entry {
 		err := mustCheckOutOfBounds(l.entries, max(lo, l.stabled+1), hi, l.firstIndex)
 		if err != nil {
 			// log.Printf("err: %s, maybe unexist entry", err.Error())
-			return []*pb.Entry{}
+			return []*pb.Entry{}, err
 		}
 
 		entries := slice(l.entries, max(lo, l.stabled+1), hi, l.firstIndex)
@@ -266,7 +314,7 @@ func (l *RaftLog) Entries(lo, hi uint64) []*pb.Entry {
 		}
 	}
 
-	return ents
+	return ents, nil
 }
 
 func (l *RaftLog) LastTerm() uint64 {
@@ -285,7 +333,7 @@ func pointer2entry(ents []*pb.Entry) []pb.Entry {
 
 	entries := make([]pb.Entry, 0, 2)
 	for _, ent := range ents {
-		entries = append(entries, *ent)	
+		entries = append(entries, *ent)
 	}
 	return entries
 }

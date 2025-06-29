@@ -1,30 +1,27 @@
 package raft
 
 import (
-	"log"
-
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
 // send 系列函数只用来发送消息，不进行任何处理，也不进行任何判断
-func (r *Raft) send(m pb.Message) bool {
+func (r *Raft) send(m pb.Message) error {
 	r.msgs = append(r.msgs, m)
-	return true
+	return nil
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
-func (r *Raft) sendAppend(to uint64) bool {
+func (r *Raft) sendAppend(to uint64) error {
 	// Your Code Here (2A).
 	index := r.Prs[to].Next
 	term, err := r.RaftLog.Term(index - 1)
 
 	if err != nil {
-		log.Print(err.Error())
-		return false
+		return err
 	}
 
-	ents := r.RaftLog.Entries(index, r.RaftLog.LastIndex()+1)
+	ents, _ := r.RaftLog.Entries(index, r.RaftLog.LastIndex()+1)
 
 	return r.send(pb.Message{
 		To:      to,
@@ -38,7 +35,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 	})
 }
 
-func (r *Raft) sendAppendResponse(to uint64, agree bool, term uint64, ent []*pb.Entry, ent1 []pb.Entry) bool {
+func (r *Raft) sendAppendResponse(to uint64, agree bool, term uint64, index uint64, ent []*pb.Entry, ent1 []pb.Entry) error {
 	if ent == nil {
 		ent = make([]*pb.Entry, 0)
 	}
@@ -57,12 +54,12 @@ func (r *Raft) sendAppendResponse(to uint64, agree bool, term uint64, ent []*pb.
 		Term:    term,
 		Reject:  !agree,
 		MsgType: pb.MessageType_MsgAppendResponse,
-		Index:   r.RaftLog.LastIndex(),
+		Index:   index,
 	})
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
-func (r *Raft) sendHeartbeat(to uint64) bool {
+func (r *Raft) sendHeartbeat(to uint64) error {
 	// Your Code Here (2A).
 	return r.send(pb.Message{
 		To:      to,
@@ -73,7 +70,7 @@ func (r *Raft) sendHeartbeat(to uint64) bool {
 	})
 }
 
-func (r *Raft) sendHeartbeatResponse(to uint64) bool {
+func (r *Raft) sendHeartbeatResponse(to uint64) error {
 	return r.send(pb.Message{
 		To:      to,
 		From:    r.id,
@@ -83,7 +80,7 @@ func (r *Raft) sendHeartbeatResponse(to uint64) bool {
 	})
 }
 
-func (r *Raft) sendRequestVote(to uint64) bool {
+func (r *Raft) sendRequestVote(to uint64) error {
 	return r.send(pb.Message{
 		To:      to,
 		From:    r.id,
@@ -94,7 +91,7 @@ func (r *Raft) sendRequestVote(to uint64) bool {
 	})
 }
 
-func (r *Raft) sendRequestVoteResponse(to uint64, term uint64, voteGranted bool) bool {
+func (r *Raft) sendRequestVoteResponse(to uint64, term uint64, voteGranted bool) error {
 	return r.send(pb.Message{
 		To:      to,
 		From:    r.id,
@@ -104,7 +101,7 @@ func (r *Raft) sendRequestVoteResponse(to uint64, term uint64, voteGranted bool)
 	})
 }
 
-func (r *Raft) sendHup(to uint64) bool {
+func (r *Raft) sendHup(to uint64) error {
 	return r.send(pb.Message{
 		From:    r.id,
 		To:      to,
@@ -113,7 +110,7 @@ func (r *Raft) sendHup(to uint64) bool {
 	})
 }
 
-func (r *Raft) sendPropose(to uint64, ent []*pb.Entry, ent1 []pb.Entry) bool {
+func (r *Raft) sendPropose(to uint64, ent []*pb.Entry, ent1 []pb.Entry) error {
 	if ent == nil {
 		ent = make([]*pb.Entry, 0)
 	}
@@ -135,10 +132,10 @@ func (r *Raft) sendPropose(to uint64, ent []*pb.Entry, ent1 []pb.Entry) bool {
 	})
 }
 
-func (r *Raft) sendSnapshot(to uint64) bool {
+func (r *Raft) sendSnapshot(to uint64) error {
 	snapshot, err := r.RaftLog.storage.Snapshot()
 	if err != nil {
-		return false
+		return err
 	}
 
 	return r.send(pb.Message{

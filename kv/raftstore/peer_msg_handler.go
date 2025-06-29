@@ -6,10 +6,13 @@ import (
 
 	"github.com/Connor1996/badger/y"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/message"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/runner"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/snap"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/log"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
@@ -38,11 +41,197 @@ func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 	}
 }
 
+// clear
+func (d *peerMsgHandler) matchProposal(entry *eraftpb.Entry) *proposal {
+	for len(d.proposals) > 0 {
+		p := d.proposals[0]
+
+		if entry.Index < p.index {
+			return nil
+		}
+
+		if entry.Index > p.index {
+			p.cb.Done(ErrRespStaleCommand(p.term))
+			d.proposals = d.proposals[1:]
+			continue
+		}
+
+		if entry.Term == p.term {
+			return p
+		}
+
+		p.cb.Done(ErrRespStaleCommand(p.term))
+		d.proposals = d.proposals[1:]
+	}
+	return nil
+}
+
+func (d *peerMsgHandler) clearStaleAndGetTargetProsal(entry *eraftpb.Entry) bool {
+	d.clearStaleProsal(entry)
+
+	if len(d.proposals) > 0 && d.proposals[0].index == entry.Index {
+		p := d.proposals[0]
+		if p.term != entry.Term {
+			NotifyStaleReq(entry.Term, p.cb)
+			d.proposals = d.proposals[1:]
+			return false
+		}
+		return true
+
+	}
+	return false
+}
+
+func (d *peerMsgHandler) clearStaleProsal(entry *eraftpb.Entry) {
+	var i int
+	for i = 0; i < len(d.proposals) && d.proposals[i].index < entry.Index; i++ {
+		d.proposals[i].cb.Done(ErrResp(&util.ErrStaleCommand{}))
+	}
+
+	d.proposals = d.proposals[1:]
+}
+
+func (d *peerMsgHandler) processAdminRequest(entry *eraftpb.Entry, cmd *raft_cmdpb.RaftCmdRequest) {
+	admin := cmd.AdminRequest
+	var p *proposal
+
+	matched := d.clearStaleAndGetTargetProsal(entry)
+
+	if matched {
+		p = d.proposals[0]
+	}
+
+	wb := &engine_util.WriteBatch{}
+
+	switch admin.CmdType {
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		cl := admin.CompactLog
+		applyState := d.peerStorage.applyState
+
+		applyState.TruncatedState.Index = cl.CompactIndex
+		applyState.TruncatedState.Term = cl.CompactTerm
+
+		wb.SetMeta(meta.ApplyStateKey(d.regionId), applyState)
+		wb.WriteToDB(d.peerStorage.Engines.Kv)
+
+		d.ScheduleCompactLog(cl.CompactIndex)
+
+		if matched && p != nil {
+			resp := &raft_cmdpb.RaftCmdResponse{
+				Header: &raft_cmdpb.RaftResponseHeader{},
+				Responses: []*raft_cmdpb.Response{
+					{
+						CmdType: raft_cmdpb.CmdType(raft_cmdpb.AdminCmdType_CompactLog),
+					},
+				},
+			}
+
+			p.cb.Done(resp)
+			d.proposals = d.proposals[1:]
+		}
+	}
+}
+
+func (d *peerMsgHandler) process(entry *eraftpb.Entry) {
+	if entry.EntryType != eraftpb.EntryType_EntryNormal || len(entry.Data) == 0 {
+		return
+	}
+
+	var cmd raft_cmdpb.RaftCmdRequest
+	if err := cmd.Unmarshal(entry.Data); err != nil {
+		panic(err)
+	}
+
+	if cmd.AdminRequest != nil {
+		d.processAdminRequest(entry, &cmd)
+		return
+	}
+
+	resp := &raft_cmdpb.RaftCmdResponse{
+		Header:    &raft_cmdpb.RaftResponseHeader{},
+		Responses: []*raft_cmdpb.Response{},
+	}
+
+	wb := &engine_util.WriteBatch{}
+	// matchedProposal := d.matchProposal(entry)
+
+	for _, req := range cmd.Requests {
+		switch req.CmdType {
+		case raft_cmdpb.CmdType_Put:
+			wb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
+		case raft_cmdpb.CmdType_Delete:
+			wb.DeleteCF(req.Delete.Cf, req.Delete.Key)
+		case raft_cmdpb.CmdType_Snap:
+		case raft_cmdpb.CmdType_Get:
+		}
+
+		matchedProposal := d.matchProposal(entry)
+
+		if matchedProposal != nil {
+			switch req.CmdType {
+			case raft_cmdpb.CmdType_Put:
+				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Put,
+					Put:     &raft_cmdpb.PutResponse{},
+				})
+			case raft_cmdpb.CmdType_Delete:
+				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Delete,
+					Delete:  &raft_cmdpb.DeleteResponse{},
+				})
+			case raft_cmdpb.CmdType_Get:
+				val, err := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key)
+				if err != nil {
+					panic(err)
+				}
+				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Get,
+					Get:     &raft_cmdpb.GetResponse{Value: val},
+				})
+			case raft_cmdpb.CmdType_Snap:
+				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Snap,
+					Snap:    &raft_cmdpb.SnapResponse{Region: d.Region()},
+				})
+				matchedProposal.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+			default:
+				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Invalid,
+				})
+			}
+		}
+
+		d.peerStorage.applyState.AppliedIndex = entry.Index
+		wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+		wb.WriteToDB(d.peerStorage.Engines.Kv)
+
+		if matchedProposal != nil {
+			matchedProposal.cb.Done(resp)
+			d.proposals = d.proposals[1:]
+		}
+	}
+}
+
 func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped {
 		return
 	}
-	// Your Code Here (2B).
+
+	if d.RaftGroup.HasReady() {
+		ready := d.RaftGroup.Ready()
+
+		if _, err := d.peerStorage.SaveReadyState(&ready); err != nil {
+			return
+		}
+
+		d.Send(d.ctx.trans, ready.Messages)
+
+		for _, entry := range ready.CommittedEntries {
+			d.process(&entry)
+		}
+
+		d.RaftGroup.Advance(ready)
+	}
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -113,7 +302,33 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		cb.Done(ErrResp(err))
 		return
 	}
+
+	// Let Snap requests go through Raft to ensure read-after-write consistency
+	// This ensures that Snap requests see all committed data
+
 	// Your Code Here (2B).
+	data, marErr := msg.Marshal()
+	if marErr != nil {
+		cb.Done(ErrResp(marErr))
+		return
+	}
+
+	// Get the index that will be assigned to this proposal
+	// We need to get this after marshaling but before proposing
+
+	proposal := &proposal{
+		index: d.nextProposalIndex(),
+		term:  d.Term(),
+		cb:    cb,
+	}
+
+	perr := d.RaftGroup.Propose(data)
+	if perr != nil {
+		cb.Done(ErrResp(perr))
+		return
+	}
+
+	d.proposals = append(d.proposals, proposal)
 }
 
 func (d *peerMsgHandler) onTick() {

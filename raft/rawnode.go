@@ -101,6 +101,7 @@ func (rn *RawNode) Campaign() error {
 // Propose proposes data be appended to the raft log.
 func (rn *RawNode) Propose(data []byte) error {
 	ent := pb.Entry{Data: data}
+
 	return rn.Raft.Step(pb.Message{
 		MsgType: pb.MessageType_MsgPropose,
 		From:    rn.Raft.id,
@@ -180,33 +181,33 @@ func (rn *RawNode) Ready() Ready {
 func (rn *RawNode) HasReady() bool {
 	ss := &SoftState{Lead: rn.Raft.Lead, RaftState: rn.Raft.State}
 	if rn.lastSoftState != nil && *rn.lastSoftState != *ss {
-		return true 
+		return true
 	}
 
 	hs := pb.HardState{Term: rn.Raft.Term, Vote: rn.Raft.Vote, Commit: rn.Raft.RaftLog.committed}
 	if !isHardStateEqual(rn.lastHardState, hs) && !IsEmptyHardState(rn.lastHardState) {
-		return true 
+		return true
 	}
 
 	if len(rn.Raft.RaftLog.unstableEntries()) > 0 {
-		return true 
+		return true
 	}
 
 	if len(rn.Raft.RaftLog.nextEnts()) > 0 {
-		return true 
+		return true
 	}
 
 	if len(rn.Raft.RaftLog.nextEnts()) > 0 {
-		return true 
+		return true
 	}
 
 	if len(rn.Raft.msgs) > 0 {
-		return true 
+		return true
 	}
 
 	// TODO: snapshot
 
-	return false 
+	return false
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
@@ -219,6 +220,7 @@ func (rn *RawNode) Advance(rd Ready) {
 
 	if len(rd.CommittedEntries) > 0 {
 		last := rd.CommittedEntries[len(rd.CommittedEntries)-1]
+
 		rn.Raft.RaftLog.appliedTo(last.Index)
 	}
 
