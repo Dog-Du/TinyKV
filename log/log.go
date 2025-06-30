@@ -282,8 +282,10 @@ func NewLogger(w io.Writer, prefix string) *Logger {
 }
 
 const debug = 0
-const debug_raft = 1
-const debug_raftStore = 1
+const debug_raft = 0
+const debug_raftStore = 0
+const debug_peerStorage = 0
+const debug_msgHandler = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if debug > 0 {
@@ -302,6 +304,20 @@ func DPrintfRaft(format string, a ...interface{}) (n int, err error) {
 func DPrintfRaftStore(format string, a ...interface{}) (n int, err error) {
 	if debug_raftStore > 0 {
 		Debugf("[RaftStore]: "+format, a...)
+	}
+	return
+}
+
+func DPrintfPeerStorage(format string, a ...interface{}) (n int, err error) {
+	if debug_peerStorage > 0 {
+		Debugf("[PeerStorage]: "+format, a...)
+	}
+	return
+}
+
+func DPrintfMsgHandler(format string, a ...interface{}) (n int, err error ){
+	if debug_msgHandler > 0 {
+		Debugf("[MsgHandler]: "+format, a...)
 	}
 	return
 }

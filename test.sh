@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # settings to change
-times=20
-project="2b"
-removelog=1
+times=10
+project="2c"
+removelog=0
 
 # don't change
 if [ ! -d "./test_output" ]; then
@@ -19,13 +19,13 @@ if [ ! -d $lastdir ]; then
     mkdir $lastdir
 fi
 summary="${lastdir}/summary.log"
-echo "times pass fail panic runtime" >> $summary
+echo "times.   pass.       fail.      panic.   error.   runtime." >> $summary
 
 totalpass=0
 totalfail=0
 totalpanic=0
 totalruntime=0
-LOG_LEVEL=fatal
+LOG_LEVEL=error
 
 for i in $(seq 1 $times)
 do
@@ -40,8 +40,10 @@ do
     echo "fail count: $fail_count"
     panic_count=$(grep -i "panic" $logfile | wc -l)
     echo "panic count: $panic_count"
+    error_count=$(grep -i "error" $logfile | wc -l)
+    echo "error count: $error_count"
     runtime=$((end-start))
-    echo "$i $pass_count $fail_count $panic_count $runtime" >> $summary
+    echo "$i.   $pass_count.    $fail_count.   $panic_count.   $error_count.   $runtime." >> $summary
 
     totalpass=$((totalpass+pass_count))
     totalfail=$((totalfail+fail_count))

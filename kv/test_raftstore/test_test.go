@@ -529,6 +529,11 @@ func TestSnapshotUnreliableRecover2C(t *testing.T) {
 	GenericTest(t, "2C", 5, true, true, false, 100, false, false)
 }
 
+func TestSnapshotOnlyPartition2C(t *testing.T) {
+	// Test: unreliable net, restarts, partitions, snapshots, many clients (2C) ...
+	GenericTest(t, "2C", 5, false, false, true, 100, false, false)
+}
+
 func TestSnapshotUnreliableRecoverConcurrentPartition2C(t *testing.T) {
 	// Test: unreliable net, restarts, partitions, snapshots, many clients (2C) ...
 	GenericTest(t, "2C", 5, true, true, true, 100, false, false)

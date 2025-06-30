@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -16,6 +17,10 @@ func (r *Raft) sendAppend(to uint64) error {
 	// Your Code Here (2A).
 	index := r.Prs[to].Next
 	term, err := r.RaftLog.Term(index - 1)
+
+	if r.RaftLog.firstIndex > index || err == ErrCompacted {
+		return r.sendSnapshot(to)
+	}
 
 	if err != nil {
 		return err
@@ -135,14 +140,27 @@ func (r *Raft) sendPropose(to uint64, ent []*pb.Entry, ent1 []pb.Entry) error {
 func (r *Raft) sendSnapshot(to uint64) error {
 	snapshot, err := r.RaftLog.storage.Snapshot()
 	if err != nil {
+		log.DPrintfRaft("[raft %d] failed to send snapshot to %d: %v", r.id, to, err)
+		if err == ErrSnapshotTemporarilyUnavailable {
+			return nil
+		}
 		return err
 	}
 
-	return r.send(pb.Message{
+	log.DPrintfRaft("[raft %d] send snapshot to %d: %v, data: %v", r.id, to, snapshot.Metadata, snapshot.Data)
+	err = r.send(pb.Message{
 		To:       to,
 		From:     r.id,
 		Term:     r.Term,
 		Snapshot: &snapshot,
 		MsgType:  pb.MessageType_MsgSnapshot,
 	})
+
+	if err != nil {
+		panic(err)
+	}
+
+	// 立刻更新，避免 snapshot 发送的过于频繁
+	r.Prs[to].Next = snapshot.Metadata.Index + 1
+	return nil
 }

@@ -255,6 +255,15 @@ func newRaft(c *Config) *Raft {
 	raft.resetElapsed()
 	raft.Term = hardstate.Term
 	raft.Vote = hardstate.Vote
+
+	// 如果Config中指定了Applied，则使用它来覆盖默认的applied值
+	// 同时也需要设置committed，因为快照中的所有条目都已经被提交了
+	if c.Applied > 0 {
+		raft.RaftLog.applied = c.Applied
+		raft.RaftLog.committed = max(raft.RaftLog.committed, c.Applied)
+	}
+
+	raft.RaftLog.check()
 	return raft
 }
 
@@ -404,6 +413,13 @@ func leaderCommit(r *Raft, index uint64) bool {
 
 	log_term, err := r.RaftLog.Term(index)
 	if err != nil {
+		if err == ErrCompacted {
+			// The index has been compacted or the entry doesn't exist,
+			// which means it's already committed or unavailable
+			// We can safely skip this commit request
+			log.Debugf("leaderCommit: index %d is unavailable (%s), skipping", index, err.Error())
+			return false
+		}
 		log.Panicf("leaderCommit called with invalid index: %d, err : %s", index, err.Error())
 	}
 
@@ -537,7 +553,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) error {
 		// term 不对应， 需要返回 firstindexof term
 		conflictTerm := uint64(0)
 		conflictIndex := m.Index
-		
+
 		if err == nil {
 			conflictTerm = term
 			conflictIndex = r.RaftLog.findFirstIndexOfTerm(conflictTerm)
@@ -676,7 +692,36 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) error {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) error {
 	// Your Code Here (2C).
-	return nil
+	if r.Term > m.Term {
+		return nil
+	}
+
+	snapMeta := m.Snapshot.Metadata
+	if r.RaftLog.committed >= snapMeta.Index {
+		return r.sendAppendResponse(m.From, false, r.Term, r.RaftLog.committed, nil, nil)
+	}
+
+	// 接受一个快照，需要把所有东西都清空。
+	log.DPrintfRaft("[raft %d] handle snapshot: %v, data: %v", r.id, m.Snapshot.Metadata, m.Snapshot.Data)
+	r.becomeFollower(m.Term, m.From)
+
+	r.RaftLog.commitTo(snapMeta.Index, snapMeta.Index)
+	r.RaftLog.appliedTo(snapMeta.Index)
+	r.RaftLog.stableTo(snapMeta.Index)
+	r.RaftLog.firstIndexTo(snapMeta.Index + 1)
+	r.RaftLog.entries = make([]pb.Entry, 0) // 清空
+	r.RaftLog.pendingSnapshot = m.Snapshot
+
+	r.Prs = make(map[uint64]*Progress)
+	for _, id := range snapMeta.ConfState.Nodes {
+		r.Prs[id] = &Progress{
+			Match: 0,
+			Next:  snapMeta.Index + 1,
+			id:    id,
+		}
+	}
+
+	return r.sendAppendResponse(m.From, true, r.Term, r.RaftLog.LastIndex(), nil, nil)
 }
 
 func (r *Raft) handleHeartbeatResponse(m pb.Message) error {
@@ -733,7 +778,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) error {
 	if m.Reject {
 		if m.Term == 0 { // index 不存在
 			r.Prs[m.From].Next = m.Index + 1
-		} else {
+		} else { // term 不一致
 			lastIndexOfTerm := r.RaftLog.findLastIndexOfTerm(m.Term)
 
 			if lastIndexOfTerm != 0 {

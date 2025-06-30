@@ -167,9 +167,15 @@ func (rn *RawNode) Ready() Ready {
 		rd.Messages = rn.Raft.msgs
 	}
 
+	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
+		rd.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
+	} else {
+		rd.Snapshot = pb.Snapshot{}
+	}
+
 	rd.Entries = rn.Raft.RaftLog.unstableEntries()
+
 	rd.CommittedEntries = rn.Raft.RaftLog.nextEnts()
-	rd.Snapshot = pb.Snapshot{}
 
 	rn.Raft.msgs = make([]pb.Message, 0)
 	rn.lastHardState = rd.HardState
@@ -205,7 +211,9 @@ func (rn *RawNode) HasReady() bool {
 		return true
 	}
 
-	// TODO: snapshot
+	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
+		return true
+	}
 
 	return false
 }
@@ -226,6 +234,9 @@ func (rn *RawNode) Advance(rd Ready) {
 
 	rn.lastHardState = rd.HardState
 	rn.lastSoftState = rd.SoftState
+
+	rn.Raft.RaftLog.pendingSnapshot = nil
+	rn.Raft.RaftLog.maybeCompact()
 }
 
 // GetProgress return the Progress of this node and its peers, if this

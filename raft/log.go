@@ -95,6 +95,12 @@ func (l *RaftLog) stableTo(index uint64) {
 	l.check()
 }
 
+func (l *RaftLog) firstIndexTo(index uint64) {
+	l.check()
+	l.firstIndex = index
+	l.check()
+}
+
 // appendlog always after committo
 func (l *RaftLog) appendLog(ents []*pb.Entry, preLogTerm uint64, preLogIndex uint64) {
 	checkEnts, err := l.Entries(preLogIndex+1, preLogIndex+1+uint64(len(ents)))
@@ -172,6 +178,23 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	firstIndex, err := l.storage.FirstIndex()
+
+	if err != nil {
+		panic(err)
+	}
+
+	if firstIndex > l.firstIndex {
+		// if firstIndex-l.firstIndex >= uint64(len(l.entries)) {
+		// 	l.entries = make([]pb.Entry, 0)
+		// } else {
+		// 	l.entries = l.entries[firstIndex-l.firstIndex:]
+		// }
+		ents := l.entries[firstIndex-l.firstIndex:]
+		l.entries = make([]pb.Entry, 0, len(ents))
+		l.entries = append(l.entries, ents...)
+		l.firstIndex = firstIndex
+	}
 }
 
 // allEntries return all the entries not compacted.
@@ -184,9 +207,13 @@ func (l *RaftLog) allEntries() []pb.Entry {
 		panic(err)
 	}
 
-	entries, err := l.storage.Entries(stableFirstIndex, l.stabled+1)
-	if err != nil {
-		panic(err)
+	entries := make([]pb.Entry, 0)
+	// 如果stableFirstIndex > l.stabled+1，说明没有stable entries需要获取
+	if stableFirstIndex <= l.stabled+1 {
+		entries, err = l.storage.Entries(stableFirstIndex, l.stabled+1)
+		if err != nil {
+			panic(err)
+		}
 	}
 
 	entries = append(entries, l.unstableEntries()...)
@@ -197,10 +224,21 @@ func (l *RaftLog) allEntries() []pb.Entry {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	if len(l.entries) == 0 {
-		return nil
+		return []pb.Entry{}
 	}
 
-	return l.entries[l.stabled-l.firstIndex+1:]
+	// 如果stabled < firstIndex，说明所有entries都是unstable的
+	if l.stabled < l.firstIndex {
+		return l.entries
+	}
+
+	// 计算unstable entries的起始位置
+	start := l.stabled - l.firstIndex + 1
+	if start >= uint64(len(l.entries)) {
+		return []pb.Entry{}
+	}
+
+	return l.entries[start:]
 }
 
 // nextEnts returns all the committed but not applied entries
@@ -242,6 +280,10 @@ func (l *RaftLog) LastEntry() *pb.Entry {
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
+	if !IsEmptySnap(l.pendingSnapshot) && i == l.pendingSnapshot.Metadata.Index {
+		return l.pendingSnapshot.Metadata.Term, nil
+	}
+
 	if i <= l.stabled { // 因为可能变成了快照
 		return l.storage.Term(i)
 	}
