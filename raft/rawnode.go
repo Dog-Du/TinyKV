@@ -81,7 +81,7 @@ func NewRawNode(config *Config) (*RawNode, error) {
 
 	return &RawNode{
 		Raft:          raft,
-		lastSoftState: nil,
+		lastSoftState: nil, // 初始化为 nil，之后从不为 nil
 		lastHardState: pb.HardState{},
 	}, nil
 }
@@ -174,12 +174,7 @@ func (rn *RawNode) Ready() Ready {
 	}
 
 	rd.Entries = rn.Raft.RaftLog.unstableEntries()
-
 	rd.CommittedEntries = rn.Raft.RaftLog.nextEnts()
-
-	rn.Raft.msgs = make([]pb.Message, 0)
-	rn.lastHardState = rd.HardState
-	rn.lastSoftState = rd.SoftState
 	return rd
 }
 
@@ -232,11 +227,17 @@ func (rn *RawNode) Advance(rd Ready) {
 		rn.Raft.RaftLog.appliedTo(last.Index)
 	}
 
-	rn.lastHardState = rd.HardState
-	rn.lastSoftState = rd.SoftState
-
 	rn.Raft.RaftLog.pendingSnapshot = nil
 	rn.Raft.RaftLog.maybeCompact()
+
+	rn.Raft.msgs = make([]pb.Message, 0)
+	rn.lastHardState = rd.HardState
+	
+	if rd.SoftState == nil {
+		rn.lastSoftState = &SoftState{}
+	} else {
+		rn.lastSoftState = rd.SoftState
+	}
 }
 
 // GetProgress return the Progress of this node and its peers, if this

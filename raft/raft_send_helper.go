@@ -164,3 +164,19 @@ func (r *Raft) sendSnapshot(to uint64) error {
 	r.Prs[to].Next = snapshot.Metadata.Index + 1
 	return nil
 }
+
+func (r *Raft) sendTimeoutNow(to uint64) error {
+	return r.send(pb.Message{
+		From: r.id,
+		To: to,
+		MsgType: pb.MessageType_MsgTimeoutNow,
+	})
+}
+
+func (r *Raft) sendLeaderTransfer(to uint64, leaderTransfer uint64) error {
+	return r.send(pb.Message{
+		From: leaderTransfer,
+		To: to,
+		MsgType: pb.MessageType_MsgTransferLeader,
+	})
+}

@@ -336,6 +336,8 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	// This ensures that Snap requests see all committed data
 
 	// Your Code Here (2B).
+
+	// 消息解码
 	data, marErr := msg.Marshal()
 	if marErr != nil {
 		cb.Done(ErrResp(marErr))
@@ -351,6 +353,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		cb:    cb,
 	}
 
+	// 将解码的消息交给 rawnode 进行 propose
 	perr := d.RaftGroup.Propose(data)
 	if perr != nil {
 		cb.Done(ErrResp(perr))

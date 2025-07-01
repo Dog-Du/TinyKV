@@ -321,12 +321,6 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 
 	ps.raftState.LastIndex = entries[len(entries)-1].Index
 	ps.raftState.LastTerm = entries[len(entries)-1].Term
-	// // 确保LastIndex只能增加，不能减少
-	// // 这对于快照应用后的情况很重要
-	// if stableLastIndex > ps.raftState.LastIndex {
-	// 	ps.raftState.LastIndex = stableLastIndex
-	// 	ps.raftState.LastTerm = entries[len(entries)-1].Term
-	// }
 
 	for _, ent := range entries {
 		raftWB.SetMeta(meta.RaftLogKey(ps.region.Id, ent.Index), &ent)

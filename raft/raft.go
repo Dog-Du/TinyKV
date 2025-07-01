@@ -319,24 +319,25 @@ func appendLog(r *Raft, ents []*pb.Entry, preLogTerm uint64, preLogIndex uint64)
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
-
 	r.Term = term
 	r.Vote = None
 	r.Lead = lead
 	r.State = StateFollower
 	r.resetElapsed()
+	r.abortTransferLeader()
 }
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
 	// Your Code Here (2A).
-
 	r.Term++
 	r.Vote = None
 	r.State = StateCandidate
+	r.Lead = None
 	r.resetElapsed()
 
 	r.votes = make(map[uint64]bool) // 清空
+	r.abortTransferLeader()
 }
 
 // becomeLeader transform this peer's state to leader
@@ -347,8 +348,10 @@ func (r *Raft) becomeLeader() {
 	r.Vote = None
 	r.State = StateLeader
 	r.votes = make(map[uint64]bool) // 清空
+	r.Lead = r.id
 
 	r.resetElapsed()
+	r.abortTransferLeader()
 
 	for _, peer := range r.Prs {
 		peer.Match = 0
@@ -483,7 +486,6 @@ func (r *Raft) Step(m pb.Message) error {
 		{
 			return r.handlePropose(m)
 		}
-
 	// 'MessageType_MsgAppend' contains log entries to replicate.
 	case pb.MessageType_MsgAppend:
 		{
@@ -517,13 +519,13 @@ func (r *Raft) Step(m pb.Message) error {
 	// 'MessageType_MsgTransferLeader' requests the leader to transfer its leadership.
 	case pb.MessageType_MsgTransferLeader:
 		{
-			// return r.handleTransferLeader(m)
+			return r.handleTransferLeader(m)
 		}
 	// 'MessageType_MsgTimeoutNow' send from the leader to the leadership transfer target, to let
 	// the transfer target timeout immediately and start a new election.
 	case pb.MessageType_MsgTimeoutNow:
 		{
-			// return r.handleTimeoutNow(m)
+			return r.handleTimeoutNow(m)
 		}
 	default:
 		{
@@ -680,6 +682,10 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) error {
 		return nil
 	}
 
+	if !r.hasPeer(m.From) {
+		return nil
+	}
+
 	if r.State == StateCandidate {
 		r.votes[m.From] = !m.Reject
 
@@ -741,6 +747,10 @@ func (r *Raft) handlePropose(m pb.Message) error {
 		return &util.ErrNotLeader{}
 	}
 
+	if r.leadTransferee != None {
+		return ErrProposalDropped
+	}
+
 	for _, ent := range m.Entries {
 		ent.Term = r.Term
 	}
@@ -769,9 +779,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) error {
 		return &util.ErrNotLeader{}
 	}
 
-	_, ok := r.Prs[m.From]
-
-	if !ok {
+	if !r.hasPeer(m.From) {
 		return nil
 	}
 
@@ -795,15 +803,112 @@ func (r *Raft) handleAppendResponse(m pb.Message) error {
 	r.Prs[m.From].Next = r.Prs[m.From].Match + 1
 
 	leaderCommit(r, r.Prs[m.From].Match)
+
+	if r.leadTransferee == m.From && r.Prs[m.From].Match == r.RaftLog.LastIndex() {
+		r.sendTimeoutNow(m.From)
+		log.DPrintfRaft("%x sends MsgTimeoutNow to %x, it's log has up-to-date.", r.id, m.From, m.From)
+	}
 	return nil
+}
+
+func (r *Raft) handleTimeoutNow(m pb.Message) error {
+	if !r.hasPeer(m.From) || !r.hasPeer(r.id) {
+		return nil
+	}
+	r.handleHup(pb.Message{})
+	return nil
+}
+
+func (r *Raft) handleTransferLeader(m pb.Message) error {
+	if r.State != StateLeader {
+		// 转发给 leader
+		return r.sendLeaderTransfer(r.Lead, m.From)
+	}
+
+	if !r.hasPeer(m.From) {
+		return nil
+	}
+
+	leadTransferee := m.From
+	lastLeadTransferee := r.leadTransferee
+	if lastLeadTransferee != None {
+		if lastLeadTransferee == leadTransferee {
+			log.DPrintfRaft("%x [term %d] transfer leadership to %x is in progress, ignores request to same node %x",
+				r.id, r.Term, leadTransferee, leadTransferee)
+			return nil
+		}
+		r.abortTransferLeader()
+		log.DPrintfRaft("%x [term %d] abort previous transferring leadership to %x", r.id, r.Term, lastLeadTransferee)
+	}
+	if leadTransferee == r.id {
+		log.DPrintfRaft("%x is already leader. Ignored transferring leadership to self", r.id)
+		return nil
+	}
+	// Transfer leadership to third party.
+	log.DPrintfRaft("%x [term %d] starts to transfer leadership to %x", r.id, r.Term, leadTransferee)
+
+	// Transfer leadership should be finished in one electionTimeout, so reset r.electionElapsed.
+	r.electionElapsed = 0
+	r.leadTransferee = leadTransferee
+
+	if r.Prs[m.From].Match == r.RaftLog.LastIndex() {
+		r.sendTimeoutNow(leadTransferee)
+		log.DPrintfRaft("%x sends MsgTimeoutNow to %x immediately as %x already has up-to-date log", r.id, leadTransferee, leadTransferee)
+	} else {
+		r.sendAppend(leadTransferee)
+	}
+	return nil
+}
+
+func (r *Raft) abortTransferLeader() {
+	// 如果 leaderTransferee == None，那么之前的工作只是在对日志，无害。
+	// 如果是立刻已经发送了，那么也是无害的，因为 timeoutnow 只是 term 增加发起一次选举而已。
+	r.leadTransferee = None
+}
+
+func (r *Raft) hasPeer(peer uint64) bool {
+	_, ok := r.Prs[peer]
+	return ok
+}
+
+func (r *Raft) isConfChange() bool {
+	return r.PendingConfIndex != None && r.PendingConfIndex > r.RaftLog.applied
 }
 
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	defer func() {
+		r.PendingConfIndex = None
+	}()
+
+	if r.hasPeer(id) {
+		return
+	}
+
+	r.Prs[id] = &Progress{
+		id:    id,
+		Match: 0,
+		Next:  1,
+	}
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+
+	defer func() {
+		r.PendingConfIndex = None
+	}()
+
+	if !r.hasPeer(id) {
+		return
+	}
+
+	delete(r.Prs, id)
+
+	if r.State == StateLeader {
+		// TODO: updateCommit
+		leaderCommit(r, r.RaftLog.LastIndex())
+	}
 }

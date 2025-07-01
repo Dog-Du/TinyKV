@@ -2,7 +2,7 @@
 
 # settings to change
 times=10
-project="2c"
+project="2"
 removelog=0
 
 # don't change
@@ -19,13 +19,13 @@ if [ ! -d $lastdir ]; then
     mkdir $lastdir
 fi
 summary="${lastdir}/summary.log"
-echo "times.   pass.       fail.      panic.   error.   runtime." >> $summary
+echo "times.   pass.       fail.      panic.       error.   runtime." >> $summary
 
 totalpass=0
 totalfail=0
 totalpanic=0
 totalruntime=0
-LOG_LEVEL=error
+LOG_LEVEL=fatal
 
 for i in $(seq 1 $times)
 do

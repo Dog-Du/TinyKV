@@ -315,7 +315,7 @@ func DPrintfPeerStorage(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-func DPrintfMsgHandler(format string, a ...interface{}) (n int, err error ){
+func DPrintfMsgHandler(format string, a ...interface{}) (n int, err error) {
 	if debug_msgHandler > 0 {
 		Debugf("[MsgHandler]: "+format, a...)
 	}
