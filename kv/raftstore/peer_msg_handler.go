@@ -36,8 +36,6 @@ type peerMsgHandler struct {
 }
 
 var ErrProcessBeforePropose = errors.New("process before propose")
-var ErrRemoveLeaderWhileTwo = errors.New("remove leader while two")
-var ErrUsedToJumpLoop = errors.New("used to jump loop")
 
 func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 	if peer.peerStorage.Engines.Kv != ctx.engine.Kv {
@@ -180,7 +178,7 @@ func (d *peerMsgHandler) executeChangePeer(admin *raft_cmdpb.AdminRequest, resp 
 			if cb != nil {
 				cb.Done(ErrResp(errors.New("raft proposal dropped")))
 			}
-			return true, ErrRemoveLeaderWhileTwo
+			return true, nil
 		}
 
 		return true, ErrProcessBeforePropose
@@ -193,15 +191,16 @@ func (d *peerMsgHandler) executeChangePeer(admin *raft_cmdpb.AdminRequest, resp 
 	case eraftpb.ConfChangeType_AddNode:
 		defer log.DPrintfMsgHandler("[%s(%s)] process insert node: %v, after insert: %v", d.Tag, d.RaftGroup.Raft.State, admin.ChangePeer.Peer, d.Region().Peers)
 
+		exist := false
 		for _, peer := range d.Region().Peers {
 			if peer.Id == admin.ChangePeer.Peer.Id && peer.StoreId == admin.ChangePeer.Peer.StoreId { // 已经存在
 				log.DPrintfMsgHandler("[%s(%s)] process insert node: %v, has inserted %v", d.Tag, d.RaftGroup.Raft.State, admin.ChangePeer.Peer, d.Region().Peers)
-				err = ErrUsedToJumpLoop
+				exist = true
 				break
 			}
 		}
 
-		if err == nil {
+		if !exist {
 			storemeta := d.ctx.storeMeta
 			storemeta.Lock()
 			d.Region().Peers = append(d.Region().Peers, admin.ChangePeer.Peer)
@@ -229,6 +228,7 @@ func (d *peerMsgHandler) executeChangePeer(admin *raft_cmdpb.AdminRequest, resp 
 	case eraftpb.ConfChangeType_RemoveNode:
 		defer log.DPrintfMsgHandler("[%s(%s)] process remove node: %v after remove: %v", d.Tag, d.RaftGroup.Raft.State, admin.ChangePeer.Peer, d.Region().Peers)
 
+		exist := true
 		for i, peer := range d.Region().Peers {
 			if peer.Id == admin.ChangePeer.Peer.Id && peer.StoreId == admin.ChangePeer.Peer.StoreId {
 				break
@@ -236,12 +236,12 @@ func (d *peerMsgHandler) executeChangePeer(admin *raft_cmdpb.AdminRequest, resp 
 
 			if i == len(d.Region().Peers)-1 { // 到了最后一个，还没找到，不存在
 				log.DPrintfMsgHandler("[%s(%s)] process remove node: %v, has removed: %v", d.Tag, d.RaftGroup.Raft.State, admin.ChangePeer.Peer, d.Region().Peers)
-				err = ErrUsedToJumpLoop
+				exist = false
 				break
 			}
 		}
 
-		if err == nil {
+		if exist {
 			// 删除
 			if admin.ChangePeer.Peer.Id == d.PeerId() && admin.ChangePeer.Peer.StoreId == d.storeID() {
 				// wb := &engine_util.WriteBatch{}
@@ -469,7 +469,7 @@ func (d *peerMsgHandler) processAdminRequest(entry *eraftpb.Entry, cmd *raft_cmd
 	}
 
 	if cb != nil {
-		if err != nil && err != ErrUsedToJumpLoop {
+		if err != nil {
 			cb.Done(ErrResp(err))
 		} else {
 			cb.Done(resp)
@@ -766,8 +766,6 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	if msg.AdminRequest != nil {
 		err := d.processAdminRequest(&eraftpb.Entry{Data: data}, msg, cb, true)
 		if err == nil {
-			return
-		} else if err == ErrRemoveLeaderWhileTwo {
 			return
 		} else if err != ErrProcessBeforePropose {
 			log.Panicf("unexpected error %v", err)

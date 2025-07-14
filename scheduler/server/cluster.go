@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gogo/protobuf/proto"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/schedulerpb"
 	"github.com/pingcap-incubator/tinykv/scheduler/pkg/logutil"
@@ -279,7 +280,44 @@ func (c *RaftCluster) handleStoreHeartbeat(stats *schedulerpb.StoreStats) error 
 // processRegionHeartbeat updates the region information.
 func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	// Your Code Here (3C).
+	metaRegion := region.GetMeta()
+	if metaRegion == nil {
+		return nil
+	}
 
+	oldRegion := c.GetRegion(metaRegion.GetId())
+	if oldRegion == nil {
+		// 如果该心跳对应的region id在调度器中找不到，扫描调度器中所有与心跳region有重叠的Regions。
+		// 同样的方法对比RegionEpoch，如果Regions中存在一个region比心跳region新，那么就是过时的。
+		overlapRegions := c.ScanRegions(metaRegion.GetStartKey(), metaRegion.GetEndKey(), -1)
+
+		for _, overlapRegion := range overlapRegions {
+			if metaRegion.GetRegionEpoch() == nil || overlapRegion.GetRegionEpoch() == nil {
+				return errors.Errorf("epoch nil")
+			}
+			if util.IsEpochStale(metaRegion.GetRegionEpoch(), overlapRegion.GetRegionEpoch()) {
+				return errors.Errorf("region heartbeat's epoch is stale")
+			}
+		}
+	} else {
+		// 如果该心跳对应的region id在调度器中存在，检查心跳中的RegionEpoch是否过时，如果过时则直接返回；
+		if metaRegion.GetRegionEpoch() == nil || oldRegion.GetRegionEpoch() == nil {
+			return errors.Errorf("epoch nil")
+		}
+		if util.IsEpochStale(metaRegion.GetRegionEpoch(), oldRegion.GetRegionEpoch()) {
+			return errors.Errorf("region heartbeat's epoch is stale")
+		}
+	}
+
+	// 如果 Scheduler 决定根据这个心跳来更新本地存储，有两件事它应该更新：region tree 和 store status。
+	// 使用 RaftCluster.core.PutRegion​ 来更新 region-tree ，并使用 RaftCluster.core.UpdateStoreStatus​ 来更新相关存储的状态（如领导者数量、区域数量、待处理的 peer 数量…）。
+	err := c.putRegion(region)
+	if err != nil {
+		return err
+	}
+	for _, store := range c.GetStores() {
+		c.updateStoreStatusLocked(store.GetID())
+	}
 	return nil
 }
 

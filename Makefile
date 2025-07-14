@@ -160,9 +160,106 @@ project3b:
 #      导致 A 不会投票给 B，这导致无限循环，永远选举不出有效的 leader。
 #      这个问题的本质是信息的不对称，我想不到什么优雅的解决方案，我的方法是：发送快照的时候多发送几次，同时在心跳的时候检测，如果发现过于落后，就发快照。概率大概在 1/50
 #      找到了，一个 peerstorage 在初始化的时候是空的，没有任何 peer 信息，即使是自己本身的信息也没有。可以通过这个判断一个节点是否初始化，然后拒绝它成为 leader。
+# 19. split 中 mark 一个错误：调用如下：
+# panic: requested entry at index is unavailable
+# goroutine 220 [running]:
+# github.com/pingcap-incubator/tinykv/raft.newLog({0x102a8c790, 0x141f55e1540})
+# 	~/WorkSpace/tinykv/raft/log.go:155 +0x1e4
+# github.com/pingcap-incubator/tinykv/raft.newRaft(0x141a46ed4f0)
+# 	~/WorkSpace/tinykv/raft/raft.go:243 +0x340
+# github.com/pingcap-incubator/tinykv/raft.NewRawNode(...)
+# 	~/WorkSpace/tinykv/raft/rawnode.go:80
+# github.com/pingcap-incubator/tinykv/kv/raftstore.NewPeer(0x3, 0x1400032e960, 0x14000370000, 0x141f5cbae00, 0x14000332850, 0x141f5cb0d50)
+# 	~/WorkSpace/tinykv/kv/raftstore/peer.go:136 +0x158
+# github.com/pingcap-incubator/tinykv/kv/raftstore.createPeer(0x3, 0x1400032e960, 0x14000332850, 0x14000370000, 0x141f5cbae00)
+# 	~/WorkSpace/tinykv/kv/raftstore/peer.go:42 +0xe0
+# github.com/pingcap-incubator/tinykv/kv/raftstore.(*peerMsgHandler).executeSplitRegion(0x141f5ca74c0, 0x141f5cb5c20, 0x141f5cb5cc0, 0x78?, 0x1419de57560?)
+# 	~/WorkSpace/tinykv/kv/raftstore/peer_msg_handler.go:360 +0x3ec
+# github.com/pingcap-incubator/tinykv/kv/raftstore.(*peerMsgHandler).processAdminRequest(0x141f5ca74c0, 0x1027df187?, 0x141a46ed9d8, 0x0, 0x0)
+# 	~/WorkSpace/tinykv/kv/raftstore/peer_msg_handler.go:461 +0x1c4
+# github.com/pingcap-incubator/tinykv/kv/raftstore.(*peerMsgHandler).process(0x141f5ca74c0, 0x141a46edc70)
+# 	~/WorkSpace/tinykv/kv/raftstore/peer_msg_handler.go:537 +0x1c4
+# github.com/pingcap-incubator/tinykv/kv/raftstore.(*peerMsgHandler).HandleRaftReady(0x141f5ca74c0)
+# 	~/WorkSpace/tinykv/kv/raftstore/peer_msg_handler.go:678 +0x3bc
+# github.com/pingcap-incubator/tinykv/kv/raftstore.(*raftWorker).run(0x14000207ba0, 0x1400029a9a0, 0x14000288f00?)
+# 	~/WorkSpace/tinykv/kv/raftstore/raft_worker.go:57 +0x378
+# created by github.com/pingcap-incubator/tinykv/kv/raftstore.(*Raftstore).startWorkers in goroutine 44
+# 	~/WorkSpace/tinykv/kv/raftstore/raftstore.go:270 +0x118
+# 出现概率极低，我测试非常多次仅仅出现一次，没办法找到原因。猜测可能跟 split 操作的原子性有关，需要元数据和持久化存储之间的紧密结合。
 
 project3c:
 	$(GOTEST) ./scheduler/server ./scheduler/server/schedulers -check.f="3C"
+# ❯ make project3c
+# GO111MODULE=on go test -v --count=1 --parallel=1 -p=1 --timeout=300s ./scheduler/server ./scheduler/server/schedulers -check.f="3C"
+# === RUN   TestServer
+# [2025/07/14 15:08:53.727 +08:00] [INFO] [server.go:129] ["PD Config"] [config="{\"client-urls\":\"http://127.0.0.1:64523\",\"peer-urls\":\"http://127.0.0.1:64524\",\"advertise-client-urls\":\"http://127.0.0.1:64523\",\"advertise-peer-urls\":\"http://127.0.0.1:64524\",\"name\":\"pd\",\"data-dir\":\"/tmp/test_pd4002976200\",\"force-new-cluster\":false,\"enable-grpc-gateway\":true,\"initial-cluster\":\"pd=http://127.0.0.1:64524\",\"initial-cluster-state\":\"new\",\"lease\":1,\"log\":{\"level\":\"\",\"format\":\"\",\"disable-timestamp\":false,\"file\":{\"filename\":\"\",\"max-size\":0,\"max-days\":0,\"max-backups\":0},\"development\":false,\"disable-caller\":false,\"disable-stacktrace\":false,\"disable-error-verbose\":false,\"sampling\":null},\"log-file\":\"\",\"log-level\":\"\",\"tso-save-interval\":\"200ms\",\"schedule\":{\"patrol-region-interval\":\"100ms\",\"max-store-down-time\":\"30m0s\",\"leader-schedule-limit\":4,\"region-schedule-limit\":2048,\"replica-schedule-limit\":64,\"schedulers-v2\":[{\"type\":\"balance-region\",\"args\":null,\"disable\":false,\"args-payload\":\"\"},{\"type\":\"balance-leader\",\"args\":null,\"disable\":false,\"args-payload\":\"\"}]},\"replication\":{\"max-replicas\":3},\"pd-server\":{\"max-reset-ts-gap\":86400000000000},\"quota-backend-bytes\":\"0B\",\"auto-compaction-mode\":\"periodic\",\"auto-compaction-retention-v2\":\"1h\",\"TickInterval\":\"100ms\",\"ElectionInterval\":\"3s\",\"security\":{\"cacert-path\":\"\",\"cert-path\":\"\",\"key-path\":\"\"},\"WarningMsgs\":null,\"DisableStrictReconfigCheck\":true,\"HeartbeatStreamBindInterval\":\"1m0s\",\"LeaderPriorityCheckInterval\":\"100ms\"}"]
+# [2025/07/14 15:08:53.727 +08:00] [INFO] [server.go:159] ["start embed etcd"]
+# [2025/07/14 15:08:53.727 +08:00] [INFO] [etcd.go:117] ["configuring peer listeners"] [listen-peer-urls="[http://127.0.0.1:64524]"]
+# [2025/07/14 15:08:53.727 +08:00] [INFO] [etcd.go:127] ["configuring client listeners"] [listen-client-urls="[http://127.0.0.1:64523]"]
+# [2025/07/14 15:08:53.727 +08:00] [INFO] [etcd.go:602] ["pprof is enabled"] [path=/debug/pprof]
+# [2025/07/14 15:08:53.727 +08:00] [INFO] [etcd.go:299] ["starting an etcd server"] [etcd-version=3.4.3] [git-sha="Not provided (use ./build instead of go build)"] [go-version=go1.24.4] [go-os=darwin] [go-arch=arm64] [max-cpu-set=8] [max-cpu-available=8] [member-initialized=false] [name=pd] [data-dir=/tmp/test_pd4002976200] [wal-dir=] [wal-dir-dedicated=] [member-dir=/tmp/test_pd4002976200/member] [force-new-cluster=false] [heartbeat-interval=100ms] [election-timeout=3s] [initial-election-tick-advance=true] [snapshot-count=100000] [snapshot-catchup-entries=5000] [initial-advertise-peer-urls="[http://127.0.0.1:64524]"] [listen-peer-urls="[http://127.0.0.1:64524]"] [advertise-client-urls="[http://127.0.0.1:64523]"] [listen-client-urls="[http://127.0.0.1:64523]"] [listen-metrics-urls="[]"] [cors="[*]"] [host-whitelist="[*]"] [initial-cluster="pd=http://127.0.0.1:64524"] [initial-cluster-state=new] [initial-cluster-token=etcd-cluster] [quota-size-bytes=2147483648] [pre-vote=false] [initial-corrupt-check=false] [corrupt-check-time-interval=0s] [auto-compaction-mode=periodic] [auto-compaction-retention=1h0m0s] [auto-compaction-interval=1h0m0s] [discovery-url=] [discovery-proxy=]
+# [2025/07/14 15:08:53.733 +08:00] [INFO] [backend.go:79] ["opened backend db"] [path=/tmp/test_pd4002976200/member/snap/db] [took=4.835042ms]
+# [2025/07/14 15:08:53.757 +08:00] [INFO] [raft.go:456] ["starting local member"] [local-member-id=44730ae8ed1a976] [cluster-id=7c0e766a9fa462a9]
+# [2025/07/14 15:08:53.757 +08:00] [INFO] [raft.go:1530] ["44730ae8ed1a976 switched to configuration voters=()"]
+# [2025/07/14 15:08:53.757 +08:00] [INFO] [raft.go:700] ["44730ae8ed1a976 became follower at term 0"]
+# [2025/07/14 15:08:53.757 +08:00] [INFO] [raft.go:383] ["newRaft 44730ae8ed1a976 [peers: [], term: 0, commit: 0, applied: 0, lastindex: 0, lastterm: 0]"]
+# [2025/07/14 15:08:53.757 +08:00] [INFO] [raft.go:700] ["44730ae8ed1a976 became follower at term 1"]
+# [2025/07/14 15:08:53.757 +08:00] [INFO] [raft.go:1530] ["44730ae8ed1a976 switched to configuration voters=(308268625776716150)"]
+# [2025/07/14 15:08:53.777 +08:00] [WARN] [store.go:1317] ["simple token is not cryptographically signed"]
+# [2025/07/14 15:08:53.785 +08:00] [INFO] [quota.go:98] ["enabled backend quota with default value"] [quota-name=v3-applier] [quota-size-bytes=2147483648] [quota-size="2.1 GB"]
+# [2025/07/14 15:08:53.793 +08:00] [INFO] [server.go:792] ["starting etcd server"] [local-member-id=44730ae8ed1a976] [local-server-version=3.4.3] [cluster-version=to_be_decided]
+# [2025/07/14 15:08:53.794 +08:00] [WARN] [metrics.go:193] ["failed to get file descriptor usage"] [error="cannot get FDUsage on darwin"]
+# [2025/07/14 15:08:53.794 +08:00] [INFO] [server.go:658] ["started as single-node; fast-forwarding election ticks"] [local-member-id=44730ae8ed1a976] [forward-ticks=29] [forward-duration=2.9s] [election-ticks=30] [election-timeout=3s]
+# [2025/07/14 15:08:53.794 +08:00] [INFO] [raft.go:1530] ["44730ae8ed1a976 switched to configuration voters=(308268625776716150)"]
+# [2025/07/14 15:08:53.794 +08:00] [INFO] [cluster.go:392] ["added member"] [cluster-id=7c0e766a9fa462a9] [local-member-id=44730ae8ed1a976] [added-peer-id=44730ae8ed1a976] [added-peer-peer-urls="[http://127.0.0.1:64524]"]
+# [2025/07/14 15:08:53.795 +08:00] [INFO] [etcd.go:576] ["serving peer traffic"] [address=127.0.0.1:64524]
+# [2025/07/14 15:08:53.795 +08:00] [INFO] [etcd.go:241] ["now serving peer/client/metrics"] [local-member-id=44730ae8ed1a976] [initial-advertise-peer-urls="[http://127.0.0.1:64524]"] [listen-peer-urls="[http://127.0.0.1:64524]"] [advertise-client-urls="[http://127.0.0.1:64523]"] [listen-client-urls="[http://127.0.0.1:64523]"] [listen-metrics-urls="[]"]
+# [2025/07/14 15:08:54.959 +08:00] [INFO] [raft.go:923] ["44730ae8ed1a976 is starting a new election at term 1"]
+# [2025/07/14 15:08:54.959 +08:00] [INFO] [raft.go:713] ["44730ae8ed1a976 became candidate at term 2"]
+# [2025/07/14 15:08:54.959 +08:00] [INFO] [raft.go:824] ["44730ae8ed1a976 received MsgVoteResp from 44730ae8ed1a976 at term 2"]
+# [2025/07/14 15:08:54.959 +08:00] [INFO] [raft.go:765] ["44730ae8ed1a976 became leader at term 2"]
+# [2025/07/14 15:08:54.959 +08:00] [INFO] [node.go:325] ["raft.node: 44730ae8ed1a976 elected leader 44730ae8ed1a976 at term 2"]
+# [2025/07/14 15:08:54.960 +08:00] [INFO] [server.go:2501] ["setting up initial cluster version"] [cluster-version=3.4]
+# [2025/07/14 15:08:54.966 +08:00] [INFO] [cluster.go:558] ["set initial cluster version"] [cluster-id=7c0e766a9fa462a9] [local-member-id=44730ae8ed1a976] [cluster-version=3.4]
+# [2025/07/14 15:08:54.966 +08:00] [INFO] [capability.go:76] ["enabled capabilities for version"] [cluster-version=3.4]
+# [2025/07/14 15:08:54.966 +08:00] [INFO] [server.go:2533] ["cluster version is updated"] [cluster-version=3.4]
+# [2025/07/14 15:08:54.967 +08:00] [INFO] [server.go:2016] ["published local member to cluster through raft"] [local-member-id=44730ae8ed1a976] [local-member-attributes="{Name:pd ClientURLs:[http://127.0.0.1:64523]}"] [request-path=/0/members/44730ae8ed1a976/attributes] [cluster-id=7c0e766a9fa462a9] [publish-timeout=11s]
+# [2025/07/14 15:08:54.971 +08:00] [INFO] [server.go:189] ["create etcd v3 client"] [endpoints="[http://127.0.0.1:64523]"]
+# panic: parsing "/debug/pprof/trace ": at offset 0: invalid method "/debug/pprof/trace"
+
+# goroutine 190 [running]:
+# net/http.(*ServeMux).register(...)
+#         /usr/local/go/src/net/http/server.go:2872
+# net/http.(*ServeMux).Handle(0x14000035eb0?, {0x102e3d8a4?, 0x14000035a98?}, {0x1032585a0?, 0x103251328?})
+#         /usr/local/go/src/net/http/server.go:2835 +0x60
+# go.etcd.io/etcd/embed.(*serveCtx).createMux(0x1400050b650, 0x1400044d960, {0x103258600, 0x140000ce180})
+#         /Users/dogdu/go/pkg/mod/go.etcd.io/etcd@v0.5.0-alpha.5.0.20191023171146-3cf2f69b5738/embed/serve.go:274 +0x90
+# go.etcd.io/etcd/embed.(*serveCtx).serve(0x1400050b650, 0x14000312008, 0x140000e6c50, {0x103258600, 0x140000ce180}, 0x1400048a030, {0x140002cdda0, 0x2, 0x2})
+#         /Users/dogdu/go/pkg/mod/go.etcd.io/etcd@v0.5.0-alpha.5.0.20191023171146-3cf2f69b5738/embed/serve.go:128 +0xeb8
+# go.etcd.io/etcd/embed.(*Etcd).serveClients.func1(0x1400050b650)
+#         /Users/dogdu/go/pkg/mod/go.etcd.io/etcd@v0.5.0-alpha.5.0.20191023171146-3cf2f69b5738/embed/etcd.go:751 +0xa4
+# created by go.etcd.io/etcd/embed.(*Etcd).serveClients in goroutine 153
+#         /Users/dogdu/go/pkg/mod/go.etcd.io/etcd@v0.5.0-alpha.5.0.20191023171146-3cf2f69b5738/embed/etcd.go:750 +0x768
+# FAIL    github.com/pingcap-incubator/tinykv/scheduler/server    1.597s
+# 基于错误信息和代码分析，这个问题是由于 etcd 版本与 Go 1.24 版本不兼容 导致的。具体原因如下：
+
+# 问题分析
+# 错误根源：错误发生在 etcd 的 HTTP ServeMux 注册 pprof 路由时
+# 错误信息：parsing "/debug/pprof/trace ": at offset 0: invalid method "/debug/pprof/trace"
+# 这是因为 Go 1.24 对 HTTP 路由解析变得更加严格
+# 版本兼容性问题：
+# 项目使用的 etcd 版本：go.etcd.io/etcd v0.5.0-alpha.5.0.20191023171146-3cf2f69b5738 (2019年的版本)
+# 当前 Go 版本：go1.24.4 (2024年版本)
+# 这个老版本的 etcd 与新版本的 Go 不兼容
+# 具体触发点：
+# 在 scheduler/server/config/config.go:613 中设置了 cfg.EnablePprof = true
+# etcd 启动时会注册 pprof 路由，但路由格式不符合新版 Go 的要求
+# 解决方案
+# 有几种解决方案：
+
+# 方案1：禁用 pprof（推荐，最简单）
+# 在 scheduler/server/config/config.go GenEmbedEtcdConfig 中将 cfg.EnablePprof 设置为 false
+
 
 project4: project4a project4b project4c
 
