@@ -615,6 +615,43 @@ func TestBasicConfChange3B(t *testing.T) {
 	MustGetNone(cluster.engines[3], []byte("k4"))
 }
 
+func TestBasicConfRestart3B(t *testing.T) {
+	cfg := config.NewTestConfig()
+	cluster := NewTestCluster(5, cfg)
+	electionTimeout := cfg.RaftBaseTickInterval * time.Duration(cfg.RaftElectionTimeoutTicks)
+
+	cluster.Start()
+	defer cluster.Shutdown()
+
+	cluster.MustTransferLeader(1, NewPeer(1, 1))
+	cluster.MustRemovePeer(1, NewPeer(2, 2))
+	cluster.MustRemovePeer(1, NewPeer(3, 3))
+	cluster.MustRemovePeer(1, NewPeer(4, 4))
+	cluster.MustRemovePeer(1, NewPeer(5, 5))
+	// now region 1 only has peer: (1, 1)
+	cluster.MustPut([]byte("k1"), []byte("v1"))
+
+	cluster.MustAddPeer(1, NewPeer(2, 10))
+	cluster.MustPut([]byte("k2"), []byte("v2"))
+	log.Warnf("shutdown servers\n")
+	for i := 1; i <= 5; i++ {
+		cluster.StopServer(uint64(i))
+	}
+	// Wait for a while for servers to shutdown, since
+	// shutdown isn't a real crash and isn't instantaneous
+	time.Sleep(electionTimeout)
+	log.Warnf("restart servers\n")
+	// crash and re-start all
+	for i := 1; i <= 5; i++ {
+		cluster.StartServer(uint64(i))
+	}
+}
+
+func TestConfChange3B(t *testing.T) {
+	// Test: restarts, snapshots, conf change, one client (3B) ...
+	GenericTest(t, "3B", 1, false, false, false, -1, true, false)
+}
+
 func TestConfChangeRemoveLeader3B(t *testing.T) {
 	cfg := config.NewTestConfig()
 	cluster := NewTestCluster(5, cfg)

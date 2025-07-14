@@ -282,8 +282,8 @@ func NewLogger(w io.Writer, prefix string) *Logger {
 }
 
 const debug = 0
-const debug_raft = 0
-const debug_raftStore = 0
+const debug_raft = 1
+const debug_raftStore = 1
 const debug_peerStorage = 0
 const debug_msgHandler = 1
 

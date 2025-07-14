@@ -143,6 +143,8 @@ func (d *storeWorker) checkMsg(msg *rspb.RaftMessage) (bool, error) {
 		return true, nil
 	}
 	if fromEpoch.ConfVer == regionEpoch.ConfVer {
+		log.Infof("tombstone peer receives a invalid message. region_id:%d, from_region_epoch:%s, current_region_epoch:%s, msg_type:%s",
+			regionID, fromEpoch, regionEpoch, msgType)
 		return false, errors.Errorf("tombstone peer [epoch: %s] received an invalid message %s, ignore it",
 			regionEpoch, msgType)
 	}
@@ -154,8 +156,14 @@ func (d *storeWorker) onRaftMessage(msg *rspb.RaftMessage) error {
 	if err := d.ctx.router.send(regionID, message.Msg{Type: message.MsgTypeRaftMessage, Data: msg}); err == nil {
 		return nil
 	}
-	log.Debugf("handle raft message. from_peer:%d, to_peer:%d, store:%d, region:%d, msg:%+v",
-		msg.FromPeer.Id, msg.ToPeer.Id, d.storeState.id, regionID, msg.Message)
+
+	if msg.Message != nil {
+		log.Debugf("handle raft message. from_peer:%d, to_peer:%d, store:%d, region:%d, msg.type:%s,msg.commit:%d, msg.index:%d, msg.term:%d, msg.reject:%v",
+			msg.FromPeer.Id, msg.ToPeer.Id, d.storeState.id, regionID, msg.Message.MsgType, msg.Message.Commit, msg.Message.Index, msg.Message.Term, msg.Message.Reject)
+	} else {
+		log.Errorf("msg == nil!!!!")
+	}
+	
 	if msg.ToPeer.StoreId != d.ctx.store.Id {
 		log.Warnf("store not match, ignore it. store_id:%d, to_store_id:%d, region_id:%d",
 			d.ctx.store.Id, msg.ToPeer.StoreId, regionID)
@@ -227,6 +235,8 @@ func (d *storeWorker) maybeCreatePeer(regionID uint64, msg *rspb.RaftMessage) (b
 	meta.regions[regionID] = peer.Region()
 	d.ctx.router.register(peer)
 	_ = d.ctx.router.send(regionID, message.Msg{Type: message.MsgTypeStart})
+
+	// meta.regionRanges.ReplaceOrInsert(&regionItem{region: peer.Region()})
 	return true, nil
 }
 

@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # settings to change
-project="2c"
-removelog=0   
-times=5
+project="3b"
+removelog=1
+times=200
 
 # title="TestConfChangeRemoveLeader3B"
 # title="TestSplitRecoverManyClients3B"
@@ -13,8 +13,14 @@ times=5
 # title="TestConfChangeSnapshotUnreliableRecover3B"
 # title="TestSplitConfChangeSnapshotUnreliableRecoverConcurrentPartition3B"
 # title="TestConfChangeUnreliableRecover3B"
-title="TestSnapshotUnreliableRecoverConcurrentPartition2C"
-LOG_LEVEL=error
+# title="TestSnapshotUnreliableRecoverConcurrentPartition2C"
+# title="TestBasicConfChange3B"
+# title="TestConfChange3B"
+# title="TestConfChangeRecover3B"
+# title="TestBasicConfRestart3B"
+# title="TestConfChangeSnapshotUnreliableRecoverConcurrentPartition3B"
+# title="TestConfChangeUnreliableRecover3B"
+LOG_LEVEL=debug
 
 # no change below this line
 if [ ! -d "./test_output" ]; then
@@ -33,6 +39,7 @@ fi
 summary="$lastdir/summary.log"
 echo "times.   pass.    fail.    panic.    error.   runtime.    panicinfo." >> $summary
 
+statistics=0
 totalpass=0
 totalfail=0
 totalpanic=0
@@ -48,15 +55,17 @@ do
     end=$(date +%s)
     pass_count=$(grep -i "PASS" $logfile | wc -l)
     echo "pass count: $pass_count"
-    fail_count=$(grep -i "fail" $logfile | wc -l)
-    echo "fail count: $fail_count"
-    panic_count=$(grep -i "panic" $logfile | wc -l)
-    echo "panic count: $panic_count"
-    error_count=$(grep -i "error" $logfile | wc -l)
-    echo "error count: $error_count"
-    runtime=$((end-start))
 
-    panic_info=$(grep -m 1 -i "panic" $logfile)
+    if [ $statistics -eq 1 ]; then
+        fail_count=$(grep -i "fail" $logfile | wc -l)
+        echo "fail count: $fail_count"
+        panic_count=$(grep -i "panic" $logfile | wc -l)
+        echo "panic count: $panic_count"
+        error_count=$(grep -i "error" $logfile | wc -l)
+        echo "error count: $error_count"
+        panic_info=$(grep -m 1 -i "panic" $logfile)
+    fi
+    runtime=$((end-start))
 
     echo "$i.   $pass_count.   $fail_count.   $panic_count.   $error_count.   $runtime.   $panic_info." >> $summary
 
@@ -70,7 +79,7 @@ do
         if [ $pass_count -eq 2 ]; then
             rm $logfile
         fi
-        sleep 5
+        sleep 1
     fi
 done
 

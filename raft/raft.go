@@ -17,8 +17,7 @@ package raft
 import (
 	"errors"
 	"math/rand"
-
-	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
+	"sort"
 
 	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
@@ -202,6 +201,8 @@ type Raft struct {
 	// 只有当 leader 的 applied index 大于该值时，才允许提出配置变更。
 	// （用于 3A 配置变更）
 	PendingConfIndex uint64
+	
+	// AddingNode       uint64 // 新增加的节点。
 }
 
 // newRaft return a raft peer with the given config
@@ -221,7 +222,7 @@ func newRaft(c *Config) *Raft {
 		for _, peer := range c.peers {
 			prs[peer] = &Progress{
 				Match: 0,
-				Next:  0,
+				Next:  1,
 				id:    peer,
 			}
 		}
@@ -229,7 +230,7 @@ func newRaft(c *Config) *Raft {
 		for _, peer := range confstate.Nodes {
 			prs[peer] = &Progress{
 				Match: 0,
-				Next:  0,
+				Next:  1,
 				id:    peer,
 			}
 		}
@@ -269,10 +270,19 @@ func newRaft(c *Config) *Raft {
 
 func (r *Raft) resetElapsed() {
 	r.heartbeatElapsed = r.heartbeatTimeout
-	//r.electionElapsed = r.electionTimeout
-
-	//r.heartbeatElapsed = rand.Intn(r.heartbeatTimeout) + 1
 	r.electionElapsed = rand.Intn(r.electionTimeout) + r.electionTimeout
+}
+
+func maybeLeader(votes map[uint64]bool, tot int) bool {
+	cnt := 0
+	for _, v := range votes {
+		if v {
+			cnt++
+		}
+	}
+
+	haveNotReceive := tot - len(votes)
+	return cnt+haveNotReceive > tot/2
 }
 
 // tick advances the internal logical clock by a single tick.
@@ -284,7 +294,12 @@ func (r *Raft) tick() {
 	r.electionElapsed--
 
 	if r.electionElapsed <= 0 {
-		r.handleHup(pb.Message{})
+		// 如果是leader且正在进行leader transfer，则中止transfer
+		if r.State == StateLeader && r.leadTransferee != None {
+			r.abortTransferLeader()
+		}
+
+		r.Step(pb.Message{MsgType: pb.MessageType_MsgHup})
 	}
 
 	if r.heartbeatElapsed <= 0 && r.State == StateLeader {
@@ -293,27 +308,21 @@ func (r *Raft) tick() {
 				continue
 			}
 			r.sendHeartbeat(peer.id)
-			// r.sendAppend(peer.id)
 		}
 
 		r.resetElapsed()
+		// 移除这里的 abortTransferLeader() 调用
+		// r.abortTransferLeader()
 	}
 }
 
 func appendLog(r *Raft, ents []*pb.Entry, preLogTerm uint64, preLogIndex uint64) {
 	r.RaftLog.appendLog(ents, preLogTerm, preLogIndex)
 
-	// Ensure the current node's progress exists
-	if r.Prs[r.id] == nil {
-		r.Prs[r.id] = &Progress{
-			Match: 0,
-			Next:  1,
-			id:    r.id,
-		}
+	if peer, ok := r.Prs[r.id]; ok {
+		peer.Match = max(peer.Match, r.RaftLog.LastIndex())
+		peer.Next = peer.Match + 1
 	}
-
-	r.Prs[r.id].Match = max(r.Prs[r.id].Match, r.RaftLog.LastIndex())
-	r.Prs[r.id].Next = r.Prs[r.id].Match + 1
 }
 
 // becomeFollower transform this peer's state to Follower
@@ -360,6 +369,8 @@ func (r *Raft) becomeLeader() {
 
 	// 添加一个空条目
 	appendLog(r, []*pb.Entry{{Term: r.Term, Index: r.RaftLog.LastIndex() + 1, Data: nil}}, r.Term, r.RaftLog.LastIndex())
+
+	log.DPrintfRaft("[raft %d] become leader", r.id)
 }
 
 func (r *Raft) canBeLeader() bool {
@@ -371,20 +382,20 @@ func (r *Raft) canBeLeader() bool {
 	}
 
 	cnt := 0
-
+	learnerCnt := 0
 	for _, v := range r.votes {
 		if v {
 			cnt++
 		}
 	}
 
-	return cnt > len(r.Prs)/2
+	return cnt > (len(r.Prs)-learnerCnt)/2
 }
 
 // 判断是否可以成为 leader，如果可以，则成为 leader 并发出 propose，并返回 true，否则返回 false。
 func becomeLeader(r *Raft, term uint64) bool {
 	if !r.canBeLeader() {
-		if len(r.votes) >= len(r.Prs) {
+		if !maybeLeader(r.votes, len(r.Prs)) {
 			r.becomeFollower(term, None) // 选举失败，变成 follower
 		}
 		return false
@@ -406,11 +417,11 @@ func becomeLeader(r *Raft, term uint64) bool {
 
 func leaderCommit(r *Raft, index uint64) bool {
 	if r.State != StateLeader {
-		log.Infof("leaderCommit called in %s state", r.State.String())
+		log.DPrintfRaft("leaderCommit called in %s state", r.State.String())
 		return false
 	}
 
-	if r.RaftLog.LastIndex() < index {
+	if r.RaftLog.LastIndex() < index || r.RaftLog.committed > index {
 		return false
 	}
 
@@ -420,7 +431,7 @@ func leaderCommit(r *Raft, index uint64) bool {
 			// The index has been compacted or the entry doesn't exist,
 			// which means it's already committed or unavailable
 			// We can safely skip this commit request
-			log.Debugf("leaderCommit: index %d is unavailable (%s), skipping", index, err.Error())
+			log.DPrintfRaft("leaderCommit: index %d is unavailable (%s), skipping", index, err.Error())
 			return false
 		}
 		log.Panicf("leaderCommit called with invalid index: %d, err : %s", index, err.Error())
@@ -431,17 +442,14 @@ func leaderCommit(r *Raft, index uint64) bool {
 	}
 
 	cnt := 0
+	learnerCnt := 0
 	for _, peer := range r.Prs {
-		if peer.id == r.id {
-			continue
-		}
-
-		if r.Prs[peer.id].Match >= index {
+		if peer.Match >= index {
 			cnt++
 		}
 	}
 
-	if cnt+1 > len(r.Prs)/2 && r.RaftLog.committed < index {
+	if cnt > (len(r.Prs)-learnerCnt)/2 && r.RaftLog.committed < index {
 		r.RaftLog.commitTo(index, index)
 
 		for _, peer := range r.Prs {
@@ -457,12 +465,49 @@ func leaderCommit(r *Raft, index uint64) bool {
 	return false
 }
 
+func (r *Raft) TransferLeaderToBest() (uint64, error) {
+	if r.State != StateLeader {
+		log.Errorf("[raft %d] TransferLeaderToBest called on non-leader", r.id)
+		return 0, nil
+	}
+
+	best := uint64(0)
+
+	for id := range r.Prs {
+		// 找到第一个不是自己的节点
+		if id != r.id {
+			best = id
+			break
+		}
+	}
+
+	for _, peer := range r.Prs {
+		if peer.id == r.id {
+			continue
+		}
+
+		// 寻找最优
+		if peer.Match > r.Prs[best].Match {
+			best = peer.id
+		}
+	}
+
+	// 因为这个函数调用于 leader 转移，肯定至少有两个节点，所以 best 不可能为 0
+	if best == r.id || best == 0 {
+		log.Panicf("[raft %d] TransferLeaderToBest called with no best leader, prs: %v", r.id, r.Prs)
+		return 0, nil
+	}
+
+	return best, r.Step(pb.Message{MsgType: pb.MessageType_MsgTransferLeader, From: best})
+}
+
 // Step the entrance of handle message, see `MessageType`
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
 
-	log.DPrintfRaft("[raft[%d](state:%s)] receive %s, term: %d, commit: %d, index: %d, reject: %v\n", r.id, r.State.String(), m.MsgType.String(), m.Term, m.Commit, m.Index, m.Reject)
+	log.DPrintfRaft("[raft[%d](state:%s)] from: %d, receive %s, term: %d, commit: %d, index: %d, reject: %v\n", r.id, r.State.String(), m.From, m.MsgType.String(), m.Term, m.Commit, m.Index, m.Reject)
+
 	switch m.MsgType {
 	// 'MessageType_MsgHup' is a local message used for election. If an election timeout happened,
 	// the node should pass 'MessageType_MsgHup' to its Step method and start a new election.
@@ -589,8 +634,7 @@ func (r *Raft) handleBeat(m pb.Message) error {
 			continue
 		}
 
-		_ = r.sendHeartbeat(peer.id) // 忽视
-		// r.sendAppend(peer.id)
+		r.sendHeartbeat(peer.id) // 忽视
 	}
 
 	return nil
@@ -601,7 +645,8 @@ func (r *Raft) handleHeartbeat(m pb.Message) error {
 	// Your Code Here (2A).
 
 	if r.Term > m.Term {
-		return nil
+		log.Debugf("[raft %d] ignore heartbeat with lower term %d from %d, current term is %d", r.id, m.Term, m.From, r.Term)
+		return r.sendHeartbeatResponse(m.From)
 	}
 
 	if r.Term <= m.Term {
@@ -624,11 +669,14 @@ func (r *Raft) handleHup(m pb.Message) error {
 			continue
 		}
 
-		_ = r.sendRequestVote(peer.id) // 忽视
+		r.sendRequestVote(peer.id) // 忽视
 	}
 
-	r.votes[r.id] = true
-	r.Vote = r.id
+	// 如果一个节点是刚被 add 进入集群的，那么它的 prs 信息为空，包括自己也是空，可以通过这个来拒绝这个情况成为 leader
+	if _, ok := r.Prs[r.id]; ok {
+		r.votes[r.id] = true
+		r.Vote = r.id
+	}
 
 	becomeLeader(r, r.Term)
 
@@ -638,24 +686,33 @@ func (r *Raft) handleHup(m pb.Message) error {
 func (r *Raft) handleRequestVote(m pb.Message) error {
 	agree := false
 
+	// 如果候选人收到其他候选人的拉票、而且拉票的任期编号不小于自己的任期编号，就会自认落选，成为追随者，并认定来拉票的候选人为领袖。from wiki
 	if r.Term < m.Term {
 		// 如果 term 小，说明发生了一个新的 election，那么直接成为这个候选者的 follower，并投票，相当于给第一个选举的节点投票
-		r.becomeFollower(m.Term, None)
+		r.Term = m.Term
+		r.Vote = m.From
+		r.Lead = None
+		r.State = StateFollower
+		// r.resetElapsed() // 不需要重置，假设这种情况：一个拥有较旧日志的 follower 先 timeout，它的 term 大导致其他节点一直没办法 timeout。
+		r.abortTransferLeader()
+		agree = true
 	}
 
-	// 如果候选人收到其他候选人的拉票、而且拉票的任期编号不小于自己的任期编号，就会自认落选，成为追随者，并认定来拉票的候选人为领袖。from wiki
 	if r.RaftLog.LastTerm() > m.LogTerm { // 如果拉票的任期编号大于自己的任期编号，则拒绝
 		agree = false
+		log.DPrintfRaft("raft %d reject vote from %d, because its last term %d is greater than %d", r.id, m.From, r.RaftLog.LastTerm(), m.LogTerm)
 	} else if r.RaftLog.LastTerm() == m.LogTerm && r.RaftLog.LastIndex() > m.Index { // 相等的时候比较索引，如果索引不同，则拒绝。
 		agree = false
+		log.DPrintfRaft("raft %d reject vote from %d, because its last index %d is greater than %d", r.id, m.From, r.RaftLog.LastIndex(), m.Index)
 	} else if r.Term > m.Term {
 		// 如果 m.term 小于当前 r.term，则拒绝
 		agree = false
+		log.DPrintfRaft("raft %d reject vote from %d, because its term %d is greater than %d", r.id, m.From, r.Term, m.Term)
 	} else if r.Vote != None && r.Vote != m.From {
 		// 如果这个 term 已经投过票，并且不是给这个节点投票，则拒绝
 		// 如果是当前状态 candidate， 会经过这个分支。
-		log.DPrintfRaft("raft %d has vote %d, reject vote from %d", r.id, r.Vote, m.From)
 		agree = false
+		log.DPrintfRaft("raft %d has vote %d, reject vote from %d", r.id, r.Vote, m.From)
 	} else if r.State == StateFollower {
 		// 现在 term 相同，同时没投过票
 		r.becomeFollower(m.Term, None)
@@ -699,6 +756,12 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) error {
 func (r *Raft) handleSnapshot(m pb.Message) error {
 	// Your Code Here (2C).
 	if r.Term > m.Term {
+		log.Errorf("[raft %d] handleSnapshot called with term %d, but current term is %d", r.id, m.Term, r.Term)
+		return nil
+	}
+
+	if r.RaftLog.pendingSnapshot != nil {
+		log.Errorf("[raft %d] handleSnapshot called with pending snapshot", r.id)
 		return nil
 	}
 
@@ -735,20 +798,34 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) error {
 		r.becomeFollower(m.Term, None)
 	}
 
-	if m.Commit < r.RaftLog.committed {
-		return r.sendAppend(m.From)
-	}
+	if r.State == StateLeader {
+		if m.Commit < r.RaftLog.committed && r.State == StateLeader {
+			return r.sendAppend(m.From)
+		}
 
+		// 添加检查，即使响应
+		if _, ok := r.Prs[m.From]; ok && r.Prs[m.From].Match < r.RaftLog.LastIndex() && r.State == StateLeader {
+			return r.sendAppend(m.From)
+		}
+	}
 	return nil
 }
 
 func (r *Raft) handlePropose(m pb.Message) error {
-	if r.State != StateLeader {
-		return &util.ErrNotLeader{}
+	if r.State != StateLeader || r.leadTransferee != None {
+		return ErrProposalDropped
 	}
 
-	if r.leadTransferee != None {
-		return ErrProposalDropped
+	if len(m.Entries) == 0 {
+		return nil
+	}
+
+	// 只需要拒绝后续的 confchange，不需要拒绝普通 propose
+	if m.Entries[0].EntryType == pb.EntryType_EntryConfChange {
+		if r.IsConfChange() {
+			return ErrProposalDropped
+		}
+		r.PendingConfIndex = r.RaftLog.LastIndex() + 1
 	}
 
 	for _, ent := range m.Entries {
@@ -757,16 +834,23 @@ func (r *Raft) handlePropose(m pb.Message) error {
 
 	appendLog(r, m.Entries, r.Term, r.RaftLog.LastIndex())
 
+	err := error(nil)
 	for _, peer := range r.Prs {
 		if peer.id == r.id {
 			continue
 		}
 
-		_ = r.sendAppend(peer.id) // 忽视
+		err1 := r.sendAppend(peer.id) // 忽视
+		if err1 != nil {
+			err = err1
+			if err1 != ErrSnapshotTemporarilyUnavailable {
+				return err1
+			}
+		}
 	}
 
 	leaderCommit(r, r.RaftLog.LastIndex())
-	return nil
+	return err
 }
 
 func (r *Raft) handleAppendResponse(m pb.Message) error {
@@ -776,7 +860,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) error {
 	}
 
 	if r.State != StateLeader {
-		return &util.ErrNotLeader{}
+		return nil
 	}
 
 	if !r.hasPeer(m.From) {
@@ -804,9 +888,15 @@ func (r *Raft) handleAppendResponse(m pb.Message) error {
 
 	leaderCommit(r, r.Prs[m.From].Match)
 
-	if r.leadTransferee == m.From && r.Prs[m.From].Match == r.RaftLog.LastIndex() {
+	// 把新节点给扶持之后再推进。
+	// if m.From == r.AddingNode && r.Prs[m.From].Match >= r.RaftLog.applied {
+	// 	r.AddingNode = None
+	// }
+
+	if r.leadTransferee == m.From && r.Prs[m.From].Match >= r.RaftLog.LastIndex() {
 		r.sendTimeoutNow(m.From)
-		log.DPrintfRaft("%x sends MsgTimeoutNow to %x, it's log has up-to-date.", r.id, m.From, m.From)
+		r.sendTimeoutNow(m.From)
+		log.DPrintfRaft("%d sends MsgTimeoutNow to %d, it's log has up-to-date.", r.id, m.From, m.From)
 	}
 	return nil
 }
@@ -815,8 +905,20 @@ func (r *Raft) handleTimeoutNow(m pb.Message) error {
 	if !r.hasPeer(m.From) || !r.hasPeer(r.id) {
 		return nil
 	}
-	r.handleHup(pb.Message{})
-	return nil
+
+	// 如果已经发过了 timeout，如果还有机会成为 leader 就进行尝试，否则再来一轮。
+	if r.State == StateCandidate && maybeLeader(r.votes, len(r.Prs)) {
+		for _, peer := range r.Prs {
+			if peer.id == r.id {
+				continue
+			}
+
+			r.sendRequestVote(peer.id)
+		}
+		return nil
+	}
+
+	return r.Step(pb.Message{MsgType: pb.MessageType_MsgHup})
 }
 
 func (r *Raft) handleTransferLeader(m pb.Message) error {
@@ -833,27 +935,36 @@ func (r *Raft) handleTransferLeader(m pb.Message) error {
 	lastLeadTransferee := r.leadTransferee
 	if lastLeadTransferee != None {
 		if lastLeadTransferee == leadTransferee {
-			log.DPrintfRaft("%x [term %d] transfer leadership to %x is in progress, ignores request to same node %x",
-				r.id, r.Term, leadTransferee, leadTransferee)
+			log.DPrintfRaft("%d [term %d] transfer leadership to %d is in progress, msg maybe loss, try again",
+				r.id, r.Term, leadTransferee)
+
+			if r.Prs[m.From].Match == r.RaftLog.LastIndex() {
+				r.sendTimeoutNow(leadTransferee)
+				r.sendTimeoutNow(leadTransferee)
+				log.DPrintfRaft("%d sends MsgTimeoutNow to %d immediately as %d already has up-to-date log", r.id, leadTransferee, leadTransferee)
+			} else {
+				r.sendAppend(leadTransferee)
+			}
 			return nil
 		}
 		r.abortTransferLeader()
-		log.DPrintfRaft("%x [term %d] abort previous transferring leadership to %x", r.id, r.Term, lastLeadTransferee)
+		log.DPrintfRaft("%d [term %d] abort previous transferring leadership to %d", r.id, r.Term, lastLeadTransferee)
 	}
 	if leadTransferee == r.id {
-		log.DPrintfRaft("%x is already leader. Ignored transferring leadership to self", r.id)
+		log.DPrintfRaft("%d is already leader. Ignored transferring leadership to self", r.id)
 		return nil
 	}
 	// Transfer leadership to third party.
-	log.DPrintfRaft("%x [term %d] starts to transfer leadership to %x", r.id, r.Term, leadTransferee)
+	log.DPrintfRaft("%d [term %d] starts to transfer leadership to %d", r.id, r.Term, leadTransferee)
 
 	// Transfer leadership should be finished in one electionTimeout, so reset r.electionElapsed.
-	r.electionElapsed = 0
+	r.electionElapsed = r.electionTimeout
 	r.leadTransferee = leadTransferee
 
 	if r.Prs[m.From].Match == r.RaftLog.LastIndex() {
 		r.sendTimeoutNow(leadTransferee)
-		log.DPrintfRaft("%x sends MsgTimeoutNow to %x immediately as %x already has up-to-date log", r.id, leadTransferee, leadTransferee)
+		r.sendTimeoutNow(leadTransferee)
+		log.DPrintfRaft("%d sends MsgTimeoutNow to %d immediately as %d already has up-to-date log", r.id, leadTransferee, leadTransferee)
 	} else {
 		r.sendAppend(leadTransferee)
 	}
@@ -871,14 +982,20 @@ func (r *Raft) hasPeer(peer uint64) bool {
 	return ok
 }
 
-func (r *Raft) isConfChange() bool {
-	return r.PendingConfIndex != None && r.PendingConfIndex > r.RaftLog.applied
+func (r *Raft) IsConfChange() bool {
+	return (r.PendingConfIndex != None && r.PendingConfIndex > r.RaftLog.applied)
+}
+
+func (r *Raft) IsAddingNode() bool {
+	return false
+	// return r.AddingNode != None
 }
 
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
 	defer func() {
+		// r.AddingNode = id
 		r.PendingConfIndex = None
 	}()
 
@@ -887,10 +1004,25 @@ func (r *Raft) addNode(id uint64) {
 	}
 
 	r.Prs[id] = &Progress{
-		id:    id,
+		id: id,
 		Match: 0,
 		Next:  1,
 	}
+
+	if r.State == StateLeader {
+		r.sendHeartbeat(id) // 促进创建
+	}
+}
+
+func shouldCommit(prs map[uint64]*Progress) uint64 {
+	sl := make([]uint64, 0, len(prs))
+
+	for _, pr := range prs {
+		sl = append(sl, pr.Match)
+	}
+
+	sort.Sort(uint64Slice(sl)) // 排序，取中位数，这个就是可以提交的 index
+	return sl[(len(sl)-1)/2]   // 较小的那个中位数 4 -> 1, 3 -> 1, 2 -> 0, 1 -> 0
 }
 
 // removeNode remove a node from raft group
@@ -908,7 +1040,6 @@ func (r *Raft) removeNode(id uint64) {
 	delete(r.Prs, id)
 
 	if r.State == StateLeader {
-		// TODO: updateCommit
-		leaderCommit(r, r.RaftLog.LastIndex())
+		leaderCommit(r, shouldCommit(r.Prs))
 	}
 }

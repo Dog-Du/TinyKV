@@ -65,6 +65,11 @@ func NewPeerStorage(engines *engine_util.Engines, region *metapb.Region, regionS
 		panic(fmt.Sprintf("%s unexpected raft log index: lastIndex %d < appliedIndex %d",
 			tag, raftState.LastIndex, applyState.AppliedIndex))
 	}
+
+	// if raft.IsEmptyHardState(*raftState.HardState) {
+	// 	log.Panicf("%s create storage for %s but hard state is empty, raftState: %v", tag, region.String(), raftState)
+	// }
+
 	return &PeerStorage{
 		Engines:     engines,
 		region:      region,
@@ -351,12 +356,17 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// Your Code Here (2C).
 
 	if ps.isInitialized() {
-		ClearMeta(ps.Engines, kvWB, raftWB, ps.region.Id, ps.raftState.LastIndex)
+		// ClearMeta(ps.Engines, kvWB, raftWB, ps.region.Id, ps.raftState.LastIndex)
+		ps.clearMeta(kvWB, raftWB)
 		ps.clearExtraData(snapData.Region)
 	}
 
 	ps.raftState.LastIndex = snapshot.Metadata.Index
 	ps.raftState.LastTerm = snapshot.Metadata.Term
+
+	// 没有用快照持久化 HardState
+	ps.raftState.HardState.Commit = snapshot.Metadata.Index
+	ps.raftState.HardState.Term = snapshot.Metadata.Term
 
 	ps.applyState.AppliedIndex = snapshot.Metadata.Index
 	ps.applyState.TruncatedState = &rspb.RaftTruncatedState{
@@ -365,7 +375,7 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	}
 
 	kvWB.SetMeta(meta.ApplyStateKey(snapData.Region.Id), ps.applyState)
-	// raftWB.SetMeta(meta.RaftStateKey(snapData.Region.Id), ps.raftState)
+	//raftWB.SetMeta(meta.RaftStateKey(snapData.Region.Id), ps.raftState)
 
 	ps.snapState.StateType = snap.SnapState_Applying
 
@@ -387,7 +397,6 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	}
 
 	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
-
 	return snapRes, nil
 
 	// prevRegion := ps.region
@@ -417,6 +426,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	if !raft.IsEmptySnap(&ready.Snapshot) {
 		applySnapResult, err = ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
 		if err != nil {
+			log.Errorf("apply snapshot failed")
 			return nil, err
 		}
 	}

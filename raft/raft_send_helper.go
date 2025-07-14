@@ -71,7 +71,7 @@ func (r *Raft) sendHeartbeat(to uint64) error {
 		From:    r.id,
 		Term:    r.Term,
 		MsgType: pb.MessageType_MsgHeartbeat,
-		Commit:  r.RaftLog.committed,
+		Commit:  min(r.RaftLog.committed, r.Prs[to].Match), // 使用 最小值，在 addnode 的时候，通过这个 commit==0 特判新建节点。
 	})
 }
 
@@ -106,37 +106,6 @@ func (r *Raft) sendRequestVoteResponse(to uint64, term uint64, voteGranted bool)
 	})
 }
 
-func (r *Raft) sendHup(to uint64) error {
-	return r.send(pb.Message{
-		From:    r.id,
-		To:      to,
-		Term:    r.Term,
-		MsgType: pb.MessageType_MsgHup,
-	})
-}
-
-func (r *Raft) sendPropose(to uint64, ent []*pb.Entry, ent1 []pb.Entry) error {
-	if ent == nil {
-		ent = make([]*pb.Entry, 0)
-	}
-
-	if ent1 == nil {
-		ent1 = make([]pb.Entry, 0)
-	}
-
-	for _, entry := range ent1 {
-		ent = append(ent, &entry)
-	}
-
-	return r.send(pb.Message{
-		To:      to,
-		From:    r.id,
-		Term:    r.Term,
-		Entries: ent,
-		MsgType: pb.MessageType_MsgPropose,
-	})
-}
-
 func (r *Raft) sendSnapshot(to uint64) error {
 	snapshot, err := r.RaftLog.storage.Snapshot()
 	if err != nil {
@@ -148,16 +117,23 @@ func (r *Raft) sendSnapshot(to uint64) error {
 	}
 
 	log.DPrintfRaft("[raft %d] send snapshot to %d: %v, data: %v", r.id, to, snapshot.Metadata, snapshot.Data)
-	err = r.send(pb.Message{
-		To:       to,
-		From:     r.id,
-		Term:     r.Term,
-		Snapshot: &snapshot,
-		MsgType:  pb.MessageType_MsgSnapshot,
-	})
 
-	if err != nil {
-		panic(err)
+	for i := 0; i < 10; i++ {
+		err = r.send(pb.Message{
+			To:       to,
+			From:     r.id,
+			Term:     r.Term,
+			Snapshot: &snapshot,
+			MsgType:  pb.MessageType_MsgSnapshot,
+		})
+
+		if err != nil {
+			panic(err)
+		}
+
+		// if r.AddingNode != to {
+		// 	break
+		// }
 	}
 
 	// 立刻更新，避免 snapshot 发送的过于频繁
@@ -167,16 +143,16 @@ func (r *Raft) sendSnapshot(to uint64) error {
 
 func (r *Raft) sendTimeoutNow(to uint64) error {
 	return r.send(pb.Message{
-		From: r.id,
-		To: to,
+		From:    r.id,
+		To:      to,
 		MsgType: pb.MessageType_MsgTimeoutNow,
 	})
 }
 
 func (r *Raft) sendLeaderTransfer(to uint64, leaderTransfer uint64) error {
 	return r.send(pb.Message{
-		From: leaderTransfer,
-		To: to,
+		From:    leaderTransfer,
+		To:      to,
 		MsgType: pb.MessageType_MsgTransferLeader,
 	})
 }

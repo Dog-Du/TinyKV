@@ -232,7 +232,7 @@ func (rn *RawNode) Advance(rd Ready) {
 
 	rn.Raft.msgs = make([]pb.Message, 0)
 	rn.lastHardState = rd.HardState
-	
+
 	if rd.SoftState == nil {
 		rn.lastSoftState = &SoftState{}
 	} else {
@@ -253,6 +253,6 @@ func (rn *RawNode) GetProgress() map[uint64]Progress {
 }
 
 // TransferLeader tries to transfer leadership to the given transferee.
-func (rn *RawNode) TransferLeader(transferee uint64) {
-	_ = rn.Raft.Step(pb.Message{MsgType: pb.MessageType_MsgTransferLeader, From: transferee})
+func (rn *RawNode) TransferLeader(transferee uint64) error {
+	return rn.Raft.Step(pb.Message{MsgType: pb.MessageType_MsgTransferLeader, From: transferee})
 }
