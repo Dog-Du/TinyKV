@@ -233,13 +233,13 @@ project3c:
 # net/http.(*ServeMux).Handle(0x14000035eb0?, {0x102e3d8a4?, 0x14000035a98?}, {0x1032585a0?, 0x103251328?})
 #         /usr/local/go/src/net/http/server.go:2835 +0x60
 # go.etcd.io/etcd/embed.(*serveCtx).createMux(0x1400050b650, 0x1400044d960, {0x103258600, 0x140000ce180})
-#         /Users/dogdu/go/pkg/mod/go.etcd.io/etcd@v0.5.0-alpha.5.0.20191023171146-3cf2f69b5738/embed/serve.go:274 +0x90
+#         ~/go/pkg/mod/go.etcd.io/etcd@v0.5.0-alpha.5.0.20191023171146-3cf2f69b5738/embed/serve.go:274 +0x90
 # go.etcd.io/etcd/embed.(*serveCtx).serve(0x1400050b650, 0x14000312008, 0x140000e6c50, {0x103258600, 0x140000ce180}, 0x1400048a030, {0x140002cdda0, 0x2, 0x2})
-#         /Users/dogdu/go/pkg/mod/go.etcd.io/etcd@v0.5.0-alpha.5.0.20191023171146-3cf2f69b5738/embed/serve.go:128 +0xeb8
+#         ~/go/pkg/mod/go.etcd.io/etcd@v0.5.0-alpha.5.0.20191023171146-3cf2f69b5738/embed/serve.go:128 +0xeb8
 # go.etcd.io/etcd/embed.(*Etcd).serveClients.func1(0x1400050b650)
-#         /Users/dogdu/go/pkg/mod/go.etcd.io/etcd@v0.5.0-alpha.5.0.20191023171146-3cf2f69b5738/embed/etcd.go:751 +0xa4
+#         ~/go/pkg/mod/go.etcd.io/etcd@v0.5.0-alpha.5.0.20191023171146-3cf2f69b5738/embed/etcd.go:751 +0xa4
 # created by go.etcd.io/etcd/embed.(*Etcd).serveClients in goroutine 153
-#         /Users/dogdu/go/pkg/mod/go.etcd.io/etcd@v0.5.0-alpha.5.0.20191023171146-3cf2f69b5738/embed/etcd.go:750 +0x768
+#         ~/go/pkg/mod/go.etcd.io/etcd@v0.5.0-alpha.5.0.20191023171146-3cf2f69b5738/embed/etcd.go:750 +0x768
 # FAIL    github.com/pingcap-incubator/tinykv/scheduler/server    1.597s
 # 基于错误信息和代码分析，这个问题是由于 etcd 版本与 Go 1.24 版本不兼容 导致的。具体原因如下：
 
