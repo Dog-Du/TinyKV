@@ -201,7 +201,7 @@ type Raft struct {
 	// 只有当 leader 的 applied index 大于该值时，才允许提出配置变更。
 	// （用于 3A 配置变更）
 	PendingConfIndex uint64
-	
+
 	// AddingNode       uint64 // 新增加的节点。
 }
 
@@ -1004,7 +1004,7 @@ func (r *Raft) addNode(id uint64) {
 	}
 
 	r.Prs[id] = &Progress{
-		id: id,
+		id:    id,
 		Match: 0,
 		Next:  1,
 	}

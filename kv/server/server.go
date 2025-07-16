@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 
 	"github.com/pingcap-incubator/tinykv/kv/coprocessor"
@@ -9,7 +8,6 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/storage/raft_storage"
 	"github.com/pingcap-incubator/tinykv/kv/transaction/latches"
 	"github.com/pingcap-incubator/tinykv/kv/transaction/mvcc"
-	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	coppb "github.com/pingcap-incubator/tinykv/proto/pkg/coprocessor"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/kvrpcpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/tinykvpb"
@@ -299,70 +297,44 @@ func (server *Server) KvScan(_ context.Context, req *kvrpcpb.ScanRequest) (*kvrp
 	// Create MVCC transaction
 	txn := mvcc.NewMvccTxn(reader, req.Version)
 
-	// Iterate through keys starting from StartKey
-	iter := reader.IterCF(engine_util.CfWrite)
-	defer iter.Close()
+	// Create scanner
+	scanner := mvcc.NewScanner(req.StartKey, txn)
+	defer scanner.Close()
 
-	// Seek to start key
-	seekKey := mvcc.EncodeKey(req.StartKey, mvcc.TsMax)
-	iter.Seek(seekKey)
-
+	// Scan keys up to the limit
 	limit := req.Limit
-	for iter.Valid() && limit > 0 {
-		item := iter.Item()
-		key := mvcc.DecodeUserKey(item.Key())
+	for limit > 0 {
+		key, value, err := scanner.Next()
+		if err != nil {
+			return nil, err
+		}
+		if key == nil && value == nil {
+			// Scanner exhausted
+			break
+		}
 
 		// Check if key is locked
 		lock, err := txn.GetLock(key)
 		if err != nil {
 			return nil, err
 		}
-		if lock != nil {
+		if lock != nil && lock.IsLockedFor(key, req.Version, &struct{}{}) {
 			kvPair := &kvrpcpb.KvPair{
 				Error: &kvrpcpb.KeyError{Locked: lock.Info(key)},
 				Key:   key,
 			}
 			resp.Pairs = append(resp.Pairs, kvPair)
-			limit--
-			// Skip to next user key
-			server.skipToNextUserKey(&iter, key)
-			continue
-		}
-
-		// Get value
-		value, err := txn.GetValue(key)
-		if err != nil {
-			return nil, err
-		}
-
-		if value != nil {
+		} else {
 			kvPair := &kvrpcpb.KvPair{
 				Key:   key,
 				Value: value,
 			}
 			resp.Pairs = append(resp.Pairs, kvPair)
-			limit--
 		}
-
-		// Skip to next user key
-		server.skipToNextUserKey(&iter, key)
+		limit--
 	}
 
 	return resp, nil
-}
-
-// skipToNextUserKey advances the iterator to the next user key
-func (server *Server) skipToNextUserKey(iter *engine_util.DBIterator, currentKey []byte) {
-	for (*iter).Valid() {
-		(*iter).Next()
-		if !(*iter).Valid() {
-			break
-		}
-		nextKey := mvcc.DecodeUserKey((*iter).Item().Key())
-		if !bytes.Equal(nextKey, currentKey) {
-			break
-		}
-	}
 }
 
 func (server *Server) KvCheckTxnStatus(_ context.Context, req *kvrpcpb.CheckTxnStatusRequest) (*kvrpcpb.CheckTxnStatusResponse, error) {

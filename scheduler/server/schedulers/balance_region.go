@@ -136,7 +136,7 @@ func (s *balanceRegionScheduler) Schedule(cluster opt.Cluster) *operator.Operato
 	target := (*core.StoreInfo)(nil)
 	source := suitableStores[0]
 
-	for i :=len(suitableStores)-1; i >= 0; i-- {
+	for i := len(suitableStores) - 1; i >= 0; i-- {
 		if region.GetStorePeer(suitableStores[i].GetID()) == nil {
 			target = suitableStores[i]
 			break

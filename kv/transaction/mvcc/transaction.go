@@ -28,6 +28,12 @@ type MvccTxn struct {
 	writes  []storage.Modify
 }
 
+// user key        ==            key
+// key + ts        == encoded    key
+// key + start_ts  == CF_DEFAULT key
+// key + commit_ts == CF_WRITE   key
+// key             == CF_LOCK    key
+
 func NewMvccTxn(reader storage.StorageReader, startTs uint64) *MvccTxn {
 	return &MvccTxn{
 		Reader:  reader,
@@ -112,6 +118,7 @@ func (txn *MvccTxn) GetValue(key []byte) ([]byte, error) {
 		itemKey := item.Key()
 
 		// Check if this key belongs to our user key
+		// if not, then there are no more writes for this key
 		userKey := DecodeUserKey(itemKey)
 		if !bytes.Equal(userKey, key) {
 			break
@@ -183,6 +190,8 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 	defer iter.Close()
 
 	// Seek to the first key that matches our user key
+	// TsMax will be turned into 00000000 by EncodeKey, so this will seek to the latest write for this key
+	// because timestamps are sorted in descending order to find the latest
 	seekKey := EncodeKey(key, TsMax)
 	iter.Seek(seekKey)
 

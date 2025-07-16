@@ -163,7 +163,7 @@ func (d *storeWorker) onRaftMessage(msg *rspb.RaftMessage) error {
 	} else {
 		log.Errorf("msg == nil!!!!")
 	}
-	
+
 	if msg.ToPeer.StoreId != d.ctx.store.Id {
 		log.Warnf("store not match, ignore it. store_id:%d, to_store_id:%d, region_id:%d",
 			d.ctx.store.Id, msg.ToPeer.StoreId, regionID)
