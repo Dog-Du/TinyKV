@@ -8,25 +8,25 @@ After completing this course, you will have the knowledge to implement a horizon
 
 The whole project is a skeleton code for a key-value server and a scheduler server at the beginning - you need to finish the core logic step by step:
 
-* [Standalone KV](doc/project1-StandaloneKV.md)
+* [Standalone KV](project1-StandaloneKV.md)
   * Implement a standalone storage engine.
   * Implement raw key-value service handlers.
-* [Raft KV](doc/project2-RaftKV.md)
+* [Raft KV](project2-RaftKV.md)
   * Implement the basic Raft algorithm.
   * Build a fault-tolerant KV server on top of Raft.
   * Add the support of Raft log garbage collection and snapshot.
-* [Multi-raft KV](doc/project3-MultiRaftKV.md)
+* [Multi-raft KV](project3-MultiRaftKV.md)
   * Implement membership change and leadership change to Raft algorithm.
   * Implement conf change and region split on Raft store.
   * Implement a basic scheduler.
-* [Transaction](doc/project4-Transaction.md)
+* [Transaction](project4-Transaction.md)
   * Implement the multi-version concurrency control layer.
   * Implement handlers of `KvGet`, `KvPrewrite`, and `KvCommit` requests.
   * Implement handlers of `KvScan`, `KvCheckTxnStatus`, `KvBatchRollback`, and `KvResolveLock` requests.
 
 ## Code Structure
 
-![overview](doc/imgs/overview.png)
+![overview](imgs/overview.png)
 
 Similar to the architecture of TiDB + TiKV + PD that separates the storage and computation, TinyKV only focuses on the storage layer of a distributed database system. If you are also interested in the SQL layer, please see [TinySQL](https://github.com/tidb-incubator/tinysql). Besides that, there is a component called TinyScheduler acting as a center control of the whole TinyKV cluster, which collects information from the heartbeats of TinyKV. After that, the TinyScheduler can generate scheduling tasks and distribute the tasks to the TinyKV instances. All of instances are communicated via RPC.
 
@@ -40,7 +40,7 @@ The whole project is organized into the following directories:
 
 ## Reading List
 
-We provide a [reading list](doc/reading_list.md) for the knowledge of distributed storage system. Though not all of them are highly related with this course, they can help you construct the knowledge system in this field.
+We provide a [reading list](reading_list.md) for the knowledge of distributed storage system. Though not all of them are highly related with this course, they can help you construct the knowledge system in this field.
 
 Also, you're encouraged to read the overview of TiKV's and PD's design to get a general impression on what you will build:
 
