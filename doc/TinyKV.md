@@ -124,7 +124,7 @@ Reader 只需要返回一个 storagereader 对象就可以了。
 
 其中 2AA 和 2AB 也就是：
 
-![img](../img/tiny-copy/1752847025493-4.png)
+![img](paper-figure2.png)
 
 照理说，需要把这几个部分地方一一**对照着论文完成**，是一定可以通过测试的。不过反过来倒不一定成立，就算通过测试，也不代表跟论文一模一样，因为 2A 测试比较水，没有什么因为网络延迟，丢包和乱序的问题，在 2B 会发现这一点。
 
@@ -276,7 +276,7 @@ read
 
 ## 流程
 
-![img](../img/tiny-copy/1752847025493-5.png)
+![img](flow.png)
 
 1. Server 发起请求给 raftstorage，转交给 raftstorage 处理
 2. raftstorage 进行包装成 raft_cmd 类型消息，并转发给对应 region 的 peer
